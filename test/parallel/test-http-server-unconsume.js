@@ -4,7 +4,8 @@ const assert = require('assert');
 const http = require('http');
 const net = require('net');
 
-['on', 'addListener', 'prependListener'].forEach((testFn) => {
+const testCases = ['on', 'addListener', 'prependListener'];
+for (const testFn of testCases) {
   let received = '';
 
   const server = http.createServer(function(req, res) {
@@ -16,8 +17,8 @@ const net = require('net');
     });
 
     server.close();
-  }).listen(0, function() {
-    const socket = net.connect(this.address().port, function() {
+  }).listen(0, common.mustCall(function() {
+    const socket = net.connect(this.address().port, common.mustCall(() => {
       socket.write('PUT / HTTP/1.1\r\nHost: example.com\r\n\r\n');
 
       socket.once('data', function() {
@@ -28,6 +29,6 @@ const net = require('net');
         assert.strictEqual(received, 'hello world',
                            `failed for socket.${testFn}`);
       }));
-    });
-  });
-});
+    }));
+  }));
+};

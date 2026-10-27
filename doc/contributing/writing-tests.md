@@ -21,16 +21,28 @@ Add tests when:
 ## Test directory structure
 
 See [directory structure overview][] for outline of existing test and locations.
-When deciding on whether to expand an existing test file or create a new one,
-consider going through the files related to the subsystem.
-For example, look for `test-streams` when writing a test for `lib/streams.js`.
+
+## How to write a good test
+
+A good test should be written in a style that is optimal for debugging
+when it fails.
+
+In principle, when adding a new test, it should be placed in a new file.
+Unless there is strong motivation to do so, refrain from appending
+new test cases to an existing file. Similar to the reproductions we ask
+for in the issue tracker, a good test should be as minimal and isolated as
+possible to facilitate debugging.
+
+A good test should come with comments explaining what it tries to test,
+so that when it fails, other contributors can fix it with the full context
+of its intention, and be able to modify it in good confidence when the context
+changes.
 
 ## Test structure
 
 Let's analyze this basic test from the Node.js test suite:
 
 ```js
-'use strict';                                                          // 1
 const common = require('../common');                                   // 2
 const fixtures = require('../common/fixtures');                        // 3
 
@@ -58,7 +70,6 @@ server.listen(0, () => {                                               // 14
 ### **Lines 1-3**
 
 ```js
-'use strict';
 const common = require('../common');
 const fixtures = require('../common/fixtures');
 ```
@@ -171,7 +182,6 @@ avoid the use of extra variables and the corresponding assertions. Let's
 explain this with a real test from the test suite.
 
 ```js
-'use strict';
 require('../common');
 const assert = require('node:assert');
 const http = require('node:http');
@@ -205,7 +215,6 @@ const server = http.createServer((req, res) => {
 This test could be greatly simplified by using `common.mustCall` like this:
 
 ```js
-'use strict';
 const common = require('../common');
 const http = require('node:http');
 
@@ -275,8 +284,6 @@ test followed by the flags. For example, to allow a test to require some of the
 A test that would require `internal/freelist` could start like this:
 
 ```js
-'use strict';
-
 // Flags: --expose-internals
 
 require('../common');
@@ -287,7 +294,7 @@ const freelist = require('node:internal/freelist');
 In specific scenarios it may be useful to get a hold of `primordials` or
 `internalBinding()`. You can do so using
 
-```console
+```bash
 node --expose-internals -r internal/test/binding lib/fs.js
 ```
 
@@ -338,7 +345,7 @@ when troubleshooting tests that timeout in CI. With no log statements, we have
 no idea where the test got hung up.
 
 There have been cases where tests fail without `console.log()`, and then pass
-when its added, so be cautious about its use, particularly in tests of the I/O
+when it's added, so be cautious about its use, particularly in tests of the I/O
 and streaming APIs.
 
 Excessive use of console output is discouraged as it can overwhelm the display,
@@ -423,36 +430,38 @@ static void at_exit_callback(void* arg) {
 }
 ```
 
-Next add the test to the `sources` in the `cctest` target in node.gyp:
+There is no need to list the file anywhere: `configure.py` collects every `.cc`
+and `.h` file under `test/cctest` into the `node_cctest_sources` variable that
+the `cctest` target in node.gyp builds.
 
-```console
-'sources': [
-  'test/cctest/test_env.cc',
-  ...
-],
-```
+If the test can only be built when a given feature is enabled, add it to the
+matching variable in node.gyp so that it is excluded from the build otherwise:
 
-The only sources that should be included in the cctest target are
-actual test or helper source files. There might be a need to include specific
-object files that are compiled by the `node` target and this can be done by
-adding them to the `libraries` section in the cctest target.
+* `node_cctest_openssl_sources` for tests that require crypto support
+* `node_cctest_quic_sources` for tests that require QUIC support
+* `node_cctest_inspector_sources` for tests that require the inspector
+
+The only sources that should be placed in `test/cctest` are actual test or
+helper source files. There might be a need to include specific object files
+that are compiled by the `node` target and this can be done by adding them to
+the `libraries` section in the cctest target.
 
 The test can be executed by running the `cctest` target:
 
-```console
-$ make cctest
+```bash
+make cctest
 ```
 
 A filter can be applied to run single/multiple test cases:
 
-```console
-$ make cctest GTEST_FILTER=EnvironmentTest.AtExitWithArgument
+```bash
+make cctest GTEST_FILTER=EnvironmentTest.AtExitWithArgument
 ```
 
 `cctest` can also be run directly which can be useful when debugging:
 
-```console
-$ out/Release/cctest --gtest_filter=EnvironmentTest.AtExit\*
+```bash
+out/Release/cctest --gtest_filter=EnvironmentTest.AtExit\*
 ```
 
 ### Node.js test fixture
@@ -471,6 +480,11 @@ To generate a test coverage report, see the
 
 Nightly coverage reports for the Node.js `main` branch are available at
 <https://coverage.nodejs.org/>.
+
+## Running tests
+
+See the [Building guide](../../BUILDING.md#running-tests) for details on how to
+run tests.
 
 [ASCII]: https://man7.org/linux/man-pages/man7/ascii.7.html
 [Google Test]: https://github.com/google/googletest

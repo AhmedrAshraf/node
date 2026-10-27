@@ -3,7 +3,17 @@
 const common = require('../common');
 
 common.skipIfInspectorDisabled();
-common.skipIfWorker(); // https://github.com/nodejs/node/issues/22767
+// The inspector NodeTracing domain is not wired up on a perfetto build, see
+// src/inspector_agent.cc, so every command here fails with
+// ERR_INSPECTOR_COMMAND.
+common.skipIfPerfettoEnabled();
+
+const { isMainThread } = require('worker_threads');
+
+if (!isMainThread) {
+  // https://github.com/nodejs/node/issues/22767
+  common.skip('This test only works on a main thread');
+}
 
 const assert = require('assert');
 const { Session } = require('inspector');

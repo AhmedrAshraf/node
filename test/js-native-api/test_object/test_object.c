@@ -1,6 +1,7 @@
 #include <js_native_api.h>
-#include "../common.h"
 #include <string.h>
+#include "../common.h"
+#include "../entry_point.h"
 #include "test_null.h"
 
 static int test_value = 3;
@@ -605,24 +606,87 @@ static napi_value TestSeal(napi_env env,
 }
 
 // We create two type tags. They are basically 128-bit UUIDs.
-static const napi_type_tag type_tags[5] = {
-  { 0xdaf987b3cc62481a, 0xb745b0497f299531 },
-  { 0xbb7936c374084d9b, 0xa9548d0762eeedb9 },
-  { 0xa5ed9ce2e4c00c38, 0 },
-  { 0, 0 },
-  { 0xa5ed9ce2e4c00c38, 0xdaf987b3cc62481a },
+#define TYPE_TAG_COUNT 5
+static const napi_type_tag type_tags[TYPE_TAG_COUNT] = {
+    {0xdaf987b3cc62481a, 0xb745b0497f299531},
+    {0xbb7936c374084d9b, 0xa9548d0762eeedb9},
+    {0xa5ed9ce2e4c00c38, 0},
+    {0, 0},
+    {0xa5ed9ce2e4c00c38, 0xdaf987b3cc62481a},
 };
+#define VALIDATE_TYPE_INDEX(env, type_index)                                   \
+  do {                                                                         \
+    if ((type_index) >= TYPE_TAG_COUNT) {                                      \
+      NODE_API_CALL((env),                                                     \
+                    napi_throw_range_error((env),                              \
+                                           "NODE_API_TEST_INVALID_TYPE_INDEX", \
+                                           "Invalid type index"));             \
+    }                                                                          \
+  } while (0)
 
 static napi_value
 TypeTaggedInstance(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   uint32_t type_index;
   napi_value instance, which_type;
+  napi_type_tag tag;
+
+  // Below we copy the tag before setting it to prevent bugs where a pointer
+  // to the tag (instead of the 128-bit tag value) is stored.
 
   NODE_API_CALL(env, napi_get_cb_info(env, info, &argc, &which_type, NULL, NULL));
   NODE_API_CALL(env, napi_get_value_uint32(env, which_type, &type_index));
+  VALIDATE_TYPE_INDEX(env, type_index);
   NODE_API_CALL(env, napi_create_object(env, &instance));
-  NODE_API_CALL(env, napi_type_tag_object(env, instance, &type_tags[type_index]));
+  tag = type_tags[type_index];
+  NODE_API_CALL(env, napi_type_tag_object(env, instance, &tag));
+
+  // Since the tag passed to napi_type_tag_object() was copied to the stack,
+  // a type tagging implementation that uses a pointer instead of the
+  // tag value would end up pointing to stack memory.
+  // When CheckTypeTag() is called later on, it might be the case that this
+  // stack address has been left untouched by accident (if no subsequent
+  // function call has clobbered it), which means the pointer would still
+  // point to valid data.
+  // To make sure that tags are stored by value and not by reference,
+  // clear this copy; any implementation using a pointer would end up with
+  // random stack data or { 0, 0 }, but not the original tag value, and fail.
+  memset(&tag, 0, sizeof(tag));
+
+  return instance;
+}
+
+// V8 will not allow us to construct an external with a NULL data value.
+#define IN_LIEU_OF_NULL ((void*)0x1)
+
+static napi_value PlainExternal(napi_env env, napi_callback_info info) {
+  napi_value instance;
+
+  NODE_API_CALL(
+      env, napi_create_external(env, IN_LIEU_OF_NULL, NULL, NULL, &instance));
+
+  return instance;
+}
+
+static napi_value TypeTaggedExternal(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  uint32_t type_index;
+  napi_value instance, which_type;
+  napi_type_tag tag;
+
+  // See TypeTaggedInstance() for an explanation about why we copy the tag
+  // to the stack and why we call memset on it after the external is tagged.
+
+  NODE_API_CALL(env,
+                napi_get_cb_info(env, info, &argc, &which_type, NULL, NULL));
+  NODE_API_CALL(env, napi_get_value_uint32(env, which_type, &type_index));
+  VALIDATE_TYPE_INDEX(env, type_index);
+  NODE_API_CALL(
+      env, napi_create_external(env, IN_LIEU_OF_NULL, NULL, NULL, &instance));
+  tag = type_tags[type_index];
+  NODE_API_CALL(env, napi_type_tag_object(env, instance, &tag));
+
+  memset(&tag, 0, sizeof(tag));
 
   return instance;
 }
@@ -636,6 +700,7 @@ CheckTypeTag(napi_env env, napi_callback_info info) {
 
   NODE_API_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   NODE_API_CALL(env, napi_get_value_uint32(env, argv[0], &type_index));
+  VALIDATE_TYPE_INDEX(env, type_index);
   NODE_API_CALL(env, napi_check_object_type_tag(env,
                                             argv[1],
                                             &type_tags[type_index],
@@ -645,34 +710,118 @@ CheckTypeTag(napi_env env, napi_callback_info info) {
   return js_result;
 }
 
+static napi_value TestCreateObjectWithProperties(napi_env env,
+                                                 napi_callback_info info) {
+  napi_value names[3];
+  napi_value values[3];
+  napi_value result;
+
+  NODE_API_CALL(
+      env, napi_create_string_utf8(env, "name", NAPI_AUTO_LENGTH, &names[0]));
+  NODE_API_CALL(
+      env, napi_create_string_utf8(env, "Foo", NAPI_AUTO_LENGTH, &values[0]));
+
+  NODE_API_CALL(
+      env, napi_create_string_utf8(env, "age", NAPI_AUTO_LENGTH, &names[1]));
+  NODE_API_CALL(env, napi_create_int32(env, 42, &values[1]));
+
+  NODE_API_CALL(
+      env, napi_create_string_utf8(env, "active", NAPI_AUTO_LENGTH, &names[2]));
+  NODE_API_CALL(env, napi_get_boolean(env, true, &values[2]));
+
+  napi_value null_prototype;
+  NODE_API_CALL(env, napi_get_null(env, &null_prototype));
+  NODE_API_CALL(env,
+                node_api_create_object_with_properties(
+                    env, null_prototype, names, values, 3, &result));
+
+  return result;
+}
+
+static napi_value TestCreateObjectWithPropertiesEmpty(napi_env env,
+                                                      napi_callback_info info) {
+  napi_value result;
+
+  NODE_API_CALL(env,
+                node_api_create_object_with_properties(
+                    env, NULL, NULL, NULL, 0, &result));
+
+  return result;
+}
+
+static napi_value TestCreateObjectWithCustomPrototype(napi_env env,
+                                                      napi_callback_info info) {
+  napi_value prototype;
+  napi_value method_name;
+  napi_value method_func;
+  napi_value names[1];
+  napi_value values[1];
+  napi_value result;
+
+  NODE_API_CALL(env, napi_create_object(env, &prototype));
+  NODE_API_CALL(
+      env,
+      napi_create_string_utf8(env, "test", NAPI_AUTO_LENGTH, &method_name));
+  NODE_API_CALL(env,
+                napi_create_function(env,
+                                     "test",
+                                     NAPI_AUTO_LENGTH,
+                                     TestCreateObjectWithProperties,
+                                     NULL,
+                                     &method_func));
+  NODE_API_CALL(env,
+                napi_set_property(env, prototype, method_name, method_func));
+
+  NODE_API_CALL(
+      env, napi_create_string_utf8(env, "value", NAPI_AUTO_LENGTH, &names[0]));
+  NODE_API_CALL(env, napi_create_int32(env, 42, &values[0]));
+
+  NODE_API_CALL(env,
+                node_api_create_object_with_properties(
+                    env, prototype, names, values, 1, &result));
+
+  return result;
+}
+
 EXTERN_C_START
 napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor descriptors[] = {
-    DECLARE_NODE_API_PROPERTY("Get", Get),
-    DECLARE_NODE_API_PROPERTY("GetNamed", GetNamed),
-    DECLARE_NODE_API_PROPERTY("GetPropertyNames", GetPropertyNames),
-    DECLARE_NODE_API_PROPERTY("GetSymbolNames", GetSymbolNames),
-    DECLARE_NODE_API_PROPERTY("GetEnumerableWritableNames", GetEnumerableWritableNames),
-    DECLARE_NODE_API_PROPERTY("GetOwnWritableNames", GetOwnWritableNames),
-    DECLARE_NODE_API_PROPERTY("GetEnumerableConfigurableNames", GetEnumerableConfigurableNames),
-    DECLARE_NODE_API_PROPERTY("GetOwnConfigurableNames", GetOwnConfigurableNames),
-    DECLARE_NODE_API_PROPERTY("Set", Set),
-    DECLARE_NODE_API_PROPERTY("SetNamed", SetNamed),
-    DECLARE_NODE_API_PROPERTY("Has", Has),
-    DECLARE_NODE_API_PROPERTY("HasNamed", HasNamed),
-    DECLARE_NODE_API_PROPERTY("HasOwn", HasOwn),
-    DECLARE_NODE_API_PROPERTY("Delete", Delete),
-    DECLARE_NODE_API_PROPERTY("New", New),
-    DECLARE_NODE_API_PROPERTY("Inflate", Inflate),
-    DECLARE_NODE_API_PROPERTY("Wrap", Wrap),
-    DECLARE_NODE_API_PROPERTY("Unwrap", Unwrap),
-    DECLARE_NODE_API_PROPERTY("TestSetProperty", TestSetProperty),
-    DECLARE_NODE_API_PROPERTY("TestHasProperty", TestHasProperty),
-    DECLARE_NODE_API_PROPERTY("TypeTaggedInstance", TypeTaggedInstance),
-    DECLARE_NODE_API_PROPERTY("CheckTypeTag", CheckTypeTag),
-    DECLARE_NODE_API_PROPERTY("TestGetProperty", TestGetProperty),
-    DECLARE_NODE_API_PROPERTY("TestFreeze", TestFreeze),
-    DECLARE_NODE_API_PROPERTY("TestSeal", TestSeal),
+      DECLARE_NODE_API_PROPERTY("Get", Get),
+      DECLARE_NODE_API_PROPERTY("GetNamed", GetNamed),
+      DECLARE_NODE_API_PROPERTY("GetPropertyNames", GetPropertyNames),
+      DECLARE_NODE_API_PROPERTY("GetSymbolNames", GetSymbolNames),
+      DECLARE_NODE_API_PROPERTY("GetEnumerableWritableNames",
+                                GetEnumerableWritableNames),
+      DECLARE_NODE_API_PROPERTY("GetOwnWritableNames", GetOwnWritableNames),
+      DECLARE_NODE_API_PROPERTY("GetEnumerableConfigurableNames",
+                                GetEnumerableConfigurableNames),
+      DECLARE_NODE_API_PROPERTY("GetOwnConfigurableNames",
+                                GetOwnConfigurableNames),
+      DECLARE_NODE_API_PROPERTY("Set", Set),
+      DECLARE_NODE_API_PROPERTY("SetNamed", SetNamed),
+      DECLARE_NODE_API_PROPERTY("Has", Has),
+      DECLARE_NODE_API_PROPERTY("HasNamed", HasNamed),
+      DECLARE_NODE_API_PROPERTY("HasOwn", HasOwn),
+      DECLARE_NODE_API_PROPERTY("Delete", Delete),
+      DECLARE_NODE_API_PROPERTY("New", New),
+      DECLARE_NODE_API_PROPERTY("Inflate", Inflate),
+      DECLARE_NODE_API_PROPERTY("Wrap", Wrap),
+      DECLARE_NODE_API_PROPERTY("Unwrap", Unwrap),
+      DECLARE_NODE_API_PROPERTY("TestSetProperty", TestSetProperty),
+      DECLARE_NODE_API_PROPERTY("TestHasProperty", TestHasProperty),
+      DECLARE_NODE_API_PROPERTY("TypeTaggedInstance", TypeTaggedInstance),
+      DECLARE_NODE_API_PROPERTY("TypeTaggedExternal", TypeTaggedExternal),
+      DECLARE_NODE_API_PROPERTY("PlainExternal", PlainExternal),
+      DECLARE_NODE_API_PROPERTY("CheckTypeTag", CheckTypeTag),
+      DECLARE_NODE_API_PROPERTY("TestGetProperty", TestGetProperty),
+      DECLARE_NODE_API_PROPERTY("TestFreeze", TestFreeze),
+      DECLARE_NODE_API_PROPERTY("TestSeal", TestSeal),
+      DECLARE_NODE_API_PROPERTY("TestCreateObjectWithProperties",
+                                TestCreateObjectWithProperties),
+      DECLARE_NODE_API_PROPERTY("TestCreateObjectWithPropertiesEmpty",
+                                TestCreateObjectWithPropertiesEmpty),
+      DECLARE_NODE_API_PROPERTY("TestCreateObjectWithCustomPrototype",
+                                TestCreateObjectWithCustomPrototype),
   };
 
   init_test_null(env, exports);

@@ -135144,7 +135144,7 @@ var ts;
              *  import "foo" |
              * or after a re-export declaration that has a module specifier:
              *  export { foo } from "foo" |
-             * Source: https://tc39.es/proposal-import-assertions/
+             * Source: https://tc39.es/proposal-import-attributes/
              */
             if (contextToken) {
                 var file = contextToken.getSourceFile();

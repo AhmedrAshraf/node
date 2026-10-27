@@ -46,9 +46,7 @@ const { getSystemErrorName } = require('util');
     delete providers.MESSAGEPORT;
     delete providers.WORKER;
     // TODO(danbev): Test for these
-    delete providers.JSUDPWRAP;
-    if (!common.isMainThread)
-      delete providers.INSPECTORJSBINDING;
+    delete providers.ARGON2REQUEST;
     delete providers.KEYPAIRGENREQUEST;
     delete providers.KEYGENREQUEST;
     delete providers.KEYEXPORTREQUEST;
@@ -63,9 +61,25 @@ const { getSystemErrorName } = require('util');
     delete providers.ELDHISTOGRAM;
     delete providers.SIGINTWATCHDOG;
     delete providers.WORKERHEAPSNAPSHOT;
-    delete providers.FIXEDSIZEBLOBCOPY;
+    delete providers.WORKERHEAPSTATISTICS;
+    delete providers.WORKERCPUUSAGE;
+    delete providers.WORKERCPUPROFILE;
+    delete providers.WORKERHEAPPROFILE;
+    delete providers.BLOBREADER;
     delete providers.RANDOMPRIMEREQUEST;
     delete providers.CHECKPRIMEREQUEST;
+    delete providers.QUIC_LOGSTREAM;
+    delete providers.QUIC_PACKET;
+    delete providers.QUIC_UDP;
+    delete providers.QUIC_ENDPOINT;
+    delete providers.QUIC_SESSION;
+    delete providers.QUIC_STREAM;
+    delete providers.LOCKS;
+    delete providers.DTLS_ENDPOINT;
+    delete providers.DTLS_SESSION;
+
+    // TODO(avivkeller): Test for these
+    delete providers.GLOBREQUEST;
 
     const objKeys = Object.keys(providers);
     if (objKeys.length > 0)
@@ -129,6 +143,7 @@ function testInitialized(req, ctor_name) {
 
 if (common.hasCrypto) { // eslint-disable-line node-core/crypto-check
   const crypto = require('crypto');
+  const { hasFIPS } = require('../common/crypto');
 
   // The handle for PBKDF2 and RandomBytes isn't returned by the function call,
   // so need to check it from the callback.
@@ -142,7 +157,8 @@ if (common.hasCrypto) { // eslint-disable-line node-core/crypto-check
     testInitialized(this, 'RandomBytesJob');
   }));
 
-  if (typeof internalBinding('crypto').ScryptJob === 'function') {
+  if (typeof internalBinding('crypto').ScryptJob === 'function' &&
+      !hasFIPS(3)) {
     crypto.scrypt('password', 'salt', 8, common.mustCall(function() {
       testInitialized(this, 'ScryptJob');
     }));
@@ -159,7 +175,7 @@ if (common.hasCrypto) { // eslint-disable-line node-core/crypto-check
   req.oncomplete = () => { };
 
   testInitialized(req, 'FSReqCallback');
-  binding.access(path.toNamespacedPath('../'), fs.F_OK, req);
+  binding.access(path.toNamespacedPath('../'), fs.constants.F_OK, req);
 
   const StatWatcher = binding.StatWatcher;
   testInitialized(new StatWatcher(), 'StatWatcher');
@@ -167,7 +183,7 @@ if (common.hasCrypto) { // eslint-disable-line node-core/crypto-check
 
 
 {
-  const { HTTPParser } = require('_http_common');
+  const { HTTPParser } = require('internal/http/common');
   const parser = new HTTPParser();
   testUninitialized(parser, 'HTTPParser');
   parser.initialize(HTTPParser.REQUEST, {});
@@ -290,7 +306,7 @@ if (common.hasCrypto) { // eslint-disable-line node-core/crypto-check
 
   // TLSWrap is exposed, but needs to be instantiated via tls_wrap.wrap().
   const tls_wrap = internalBinding('tls_wrap');
-  testInitialized(tls_wrap.wrap(tcp, credentials.context, true), 'TLSWrap');
+  testInitialized(tls_wrap.wrap(tcp, credentials.context, true, false), 'TLSWrap');
 }
 
 {
@@ -308,13 +324,6 @@ if (common.hasCrypto) { // eslint-disable-line node-core/crypto-check
   req.oncomplete = () => handle.close();
   handle.send(req, [Buffer.alloc(1)], 1, req.port, req.address, true);
   testInitialized(req, 'SendWrap');
-}
-
-if (process.features.inspector && common.isMainThread) {
-  const binding = internalBinding('inspector');
-  const handle = new binding.Connection(() => {});
-  testInitialized(handle, 'Connection');
-  handle.disconnect();
 }
 
 // PROVIDER_HEAPDUMP

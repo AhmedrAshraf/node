@@ -2,7 +2,6 @@
 const common = require('../common');
 const assert = require('node:assert');
 const { mock, test } = require('node:test');
-
 test('spies on a function', (t) => {
   const sum = t.mock.fn((arg1, arg2) => {
     return arg1 + arg2;
@@ -319,6 +318,157 @@ test('spy functions can be bound', (t) => {
   assert.strictEqual(sum.bind(0)(2, 11), 13);
 });
 
+test('mocks prototype methods on an instance', async (t) => {
+  class Runner {
+    async someTask(msg) {
+      return Promise.resolve(msg);
+    }
+
+    async method(msg) {
+      await this.someTask(msg);
+      return msg;
+    }
+  }
+  const msg = 'ok';
+  const obj = new Runner();
+  assert.strictEqual(await obj.method(msg), msg);
+
+  t.mock.method(obj, obj.someTask.name);
+  assert.strictEqual(obj.someTask.mock.calls.length, 0);
+
+  assert.strictEqual(await obj.method(msg), msg);
+
+  const call = obj.someTask.mock.calls[0];
+
+  assert.deepStrictEqual(call.arguments, [msg]);
+  assert.strictEqual(await call.result, msg);
+  assert.strictEqual(call.target, undefined);
+  assert.strictEqual(call.this, obj);
+
+  const obj2 = new Runner();
+  // Ensure that a brand new instance is not mocked
+  assert.strictEqual(
+    obj2.someTask.mock,
+    undefined
+  );
+
+  assert.strictEqual(obj.someTask.mock.restore(), undefined);
+  assert.strictEqual(await obj.method(msg), msg);
+  assert.strictEqual(obj.someTask.mock, undefined);
+  assert.strictEqual(Runner.prototype.someTask.mock, undefined);
+});
+
+test('spies on async static class methods', async (t) => {
+  class Runner {
+    static async someTask(msg) {
+      return Promise.resolve(msg);
+    }
+
+    static async method(msg) {
+      await this.someTask(msg);
+      return msg;
+    }
+  }
+  const msg = 'ok';
+  assert.strictEqual(await Runner.method(msg), msg);
+
+  t.mock.method(Runner, Runner.someTask.name);
+  assert.strictEqual(Runner.someTask.mock.calls.length, 0);
+
+  assert.strictEqual(await Runner.method(msg), msg);
+
+  const call = Runner.someTask.mock.calls[0];
+
+  assert.deepStrictEqual(call.arguments, [msg]);
+  assert.strictEqual(await call.result, msg);
+  assert.strictEqual(call.target, undefined);
+  assert.strictEqual(call.this, Runner);
+
+  assert.strictEqual(Runner.someTask.mock.restore(), undefined);
+  assert.strictEqual(await Runner.method(msg), msg);
+  assert.strictEqual(Runner.someTask.mock, undefined);
+  assert.strictEqual(Runner.prototype.someTask, undefined);
+
+});
+
+test('given null to a mock.method it throws an invalid argument error', (t) => {
+  assert.throws(() => t.mock.method(null, {}), { code: 'ERR_INVALID_ARG_TYPE' });
+});
+
+test('it should throw given an inexistent property on a object instance', (t) => {
+  assert.throws(() => t.mock.method({ abc: 0 }, 'non-existent'), {
+    code: 'ERR_INVALID_ARG_VALUE'
+  });
+});
+
+test('spy functions can be used on classes inheritance', (t) => {
+  // Makes sure that having a null-prototype doesn't throw our system off
+  class A extends null {
+    static someTask(msg) {
+      return msg;
+    }
+    static method(msg) {
+      return this.someTask(msg);
+    }
+  }
+  class B extends A {}
+  class C extends B {}
+
+  const msg = 'ok';
+  assert.strictEqual(C.method(msg), msg);
+
+  t.mock.method(C, C.someTask.name);
+  assert.strictEqual(C.someTask.mock.calls.length, 0);
+
+  assert.strictEqual(C.method(msg), msg);
+
+  const call = C.someTask.mock.calls[0];
+
+  assert.deepStrictEqual(call.arguments, [msg]);
+  assert.strictEqual(call.result, msg);
+  assert.strictEqual(call.target, undefined);
+  assert.strictEqual(call.this, C);
+
+  assert.strictEqual(C.someTask.mock.restore(), undefined);
+  assert.strictEqual(C.method(msg), msg);
+  assert.strictEqual(C.someTask.mock, undefined);
+});
+
+test('spy functions don\'t affect the prototype chain', (t) => {
+
+  class A {
+    static someTask(msg) {
+      return msg;
+    }
+  }
+  class B extends A {}
+  class C extends B {}
+
+  const msg = 'ok';
+
+  const ABeforeMockIsUnchanged = Object.getOwnPropertyDescriptor(A, A.someTask.name);
+  const BBeforeMockIsUnchanged = Object.getOwnPropertyDescriptor(B, B.someTask.name);
+  const CBeforeMockShouldNotHaveDesc = Object.getOwnPropertyDescriptor(C, C.someTask.name);
+
+  t.mock.method(C, C.someTask.name);
+  C.someTask(msg);
+  const BAfterMockIsUnchanged = Object.getOwnPropertyDescriptor(B, B.someTask.name);
+
+  const AAfterMockIsUnchanged = Object.getOwnPropertyDescriptor(A, A.someTask.name);
+  const CAfterMockHasDescriptor = Object.getOwnPropertyDescriptor(C, C.someTask.name);
+
+  assert.strictEqual(CBeforeMockShouldNotHaveDesc, undefined);
+  assert.ok(CAfterMockHasDescriptor);
+
+  assert.deepStrictEqual(ABeforeMockIsUnchanged, AAfterMockIsUnchanged);
+  assert.strictEqual(BBeforeMockIsUnchanged, BAfterMockIsUnchanged);
+  assert.strictEqual(BBeforeMockIsUnchanged, undefined);
+
+  assert.strictEqual(C.someTask.mock.restore(), undefined);
+  const CAfterRestoreKeepsDescriptor = Object.getOwnPropertyDescriptor(C, C.someTask.name);
+  assert.ok(CAfterRestoreKeepsDescriptor);
+});
+
 test('mocked functions report thrown errors', (t) => {
   const testError = new Error('test error');
   const fn = t.mock.fn(() => {
@@ -409,6 +559,7 @@ test('mocks a constructor', (t) => {
   }
 
   class MockClazz {
+    // eslint-disable-next-line no-unused-private-class-members
     #privateValue;
 
     constructor(z) {
@@ -741,6 +892,52 @@ test('mock implementation can be changed dynamically', (t) => {
   assert.strictEqual(fn.mock.callCount(), 12);
 });
 
+test('mockReturnValue() sets a fixed return value', (t) => {
+  const fn = t.mock.fn(common.mustNotCall());
+
+  fn.mock.mockReturnValue(42);
+  assert.strictEqual(fn(), 42);
+  assert.strictEqual(fn(1, 2), 42);
+  assert.strictEqual(fn.mock.callCount(), 2);
+  assert.strictEqual(fn.mock.calls[1].result, 42);
+});
+
+test('mockResolvedValue() returns a resolved promise', async (t) => {
+  const fn = t.mock.fn(common.mustNotCall());
+
+  fn.mock.mockResolvedValue(42);
+  const result = fn();
+  assert(result instanceof Promise);
+  assert.strictEqual(await result, 42);
+});
+
+test('mockRejectedValue() returns a rejected promise', async (t) => {
+  const fn = t.mock.fn(common.mustNotCall());
+  const error = new Error('boom');
+
+  fn.mock.mockRejectedValue(error);
+  await assert.rejects(fn(), error);
+});
+
+test('mockThrownValue() throws the given value', (t) => {
+  const fn = t.mock.fn(common.mustNotCall());
+  const error = new Error('boom');
+
+  fn.mock.mockThrownValue(error);
+  assert.throws(fn, error);
+  assert.strictEqual(fn.mock.callCount(), 1);
+  assert.strictEqual(fn.mock.calls[0].error, error);
+});
+
+test('mockImplementationOnce() takes precedence over mockReturnValue()', (t) => {
+  const fn = t.mock.fn();
+
+  fn.mock.mockReturnValue(1);
+  fn.mock.mockImplementationOnce(() => 2);
+  assert.strictEqual(fn(), 2);
+  assert.strictEqual(fn(), 1);
+});
+
 test('local mocks are auto restored after the test finishes', async (t) => {
   const obj = {
     foo() {},
@@ -758,15 +955,15 @@ test('local mocks are auto restored after the test finishes', async (t) => {
   assert.notStrictEqual(originalFoo, obj.foo);
   assert.strictEqual(originalBar, obj.bar);
 
-  t.beforeEach(() => {
+  t.beforeEach(common.mustCallAtLeast(() => {
     assert.strictEqual(mockFoo, obj.foo);
     assert.strictEqual(originalBar, obj.bar);
-  });
+  }));
 
-  t.afterEach(() => {
+  t.afterEach(common.mustCallAtLeast(() => {
     assert.strictEqual(mockFoo, obj.foo);
     assert.notStrictEqual(originalBar, obj.bar);
-  });
+  }));
 
   await t.test('creates mocks that are auto restored', (t) => {
     const mockBar = t.mock.method(obj, 'bar');
@@ -778,6 +975,23 @@ test('local mocks are auto restored after the test finishes', async (t) => {
 
   assert.strictEqual(mockFoo, obj.foo);
   assert.strictEqual(originalBar, obj.bar);
+});
+
+test('reset mock calls', (t) => {
+  const sum = (arg1, arg2) => arg1 + arg2;
+  const difference = (arg1, arg2) => arg1 - arg2;
+  const fn = t.mock.fn(sum, difference);
+
+  assert.strictEqual(fn(1, 2), -1);
+  assert.strictEqual(fn(2, 1), 1);
+  assert.strictEqual(fn.mock.calls.length, 2);
+  assert.strictEqual(fn.mock.callCount(), 2);
+
+  fn.mock.resetCalls();
+  assert.strictEqual(fn.mock.calls.length, 0);
+  assert.strictEqual(fn.mock.callCount(), 0);
+
+  assert.strictEqual(fn(3, 2), 1);
 });
 
 test('uses top level mock', () => {
@@ -885,4 +1099,222 @@ test('setter() fails if getter options is true', (t) => {
   assert.throws(() => {
     t.mock.setter({}, 'method', { getter: true });
   }, /The property 'options\.setter' cannot be used with 'options\.getter'/);
+});
+
+test('spies on a property', (t) => {
+  const obj = { foo: 42 };
+  const prop = t.mock.property(obj, 'foo', 100);
+
+  assert.strictEqual(obj.foo, 100);
+  assert.strictEqual(prop.mock.accessCount(), 1);
+  assert.strictEqual(prop.mock.accesses[0].type, 'get');
+  assert.strictEqual(prop.mock.accesses[0].value, 100);
+
+  obj.foo = 200;
+  assert.strictEqual(obj.foo, 200);
+  assert.strictEqual(prop.mock.accesses.length, 3);
+  assert.strictEqual(prop.mock.accesses[1].type, 'set');
+  assert.strictEqual(prop.mock.accesses[1].value, 200);
+  assert.strictEqual(prop.mock.accesses[2].type, 'get');
+  assert.strictEqual(prop.mock.accesses[2].value, 200);
+
+  obj.foo = 300;
+  assert.strictEqual(obj.foo, 300);
+  assert.strictEqual(prop.mock.accessCount(), 5);
+  assert.strictEqual(prop.mock.accesses[3].type, 'set');
+  assert.strictEqual(prop.mock.accesses[3].value, 300);
+  assert.strictEqual(prop.mock.accesses[4].type, 'get');
+  assert.strictEqual(prop.mock.accesses[4].value, 300);
+
+  prop.mock.resetAccesses();
+  assert.strictEqual(prop.mock.accessCount(), 0);
+
+  obj.foo = 500;
+  assert.strictEqual(obj.foo, 500);
+  assert.strictEqual(prop.mock.accessCount(), 2);
+  assert.strictEqual(prop.mock.accesses[0].type, 'set');
+  assert.strictEqual(prop.mock.accesses[1].type, 'get');
+
+  prop.mock.resetAccesses();
+  assert.strictEqual(prop.mock.accessCount(), 0);
+
+  assert.strictEqual(obj.foo, 500);
+  assert.strictEqual(prop.mock.accessCount(), 1);
+  assert.strictEqual(prop.mock.accesses[0].type, 'get');
+
+  prop.mock.restore();
+  assert.strictEqual(obj.foo, 42);
+});
+
+test('spies on a property without providing a value', (t) => {
+  const obj = { foo: 123 };
+  const prop = t.mock.property(obj, 'foo');
+
+  assert.strictEqual(obj.foo, 123);
+  assert.strictEqual(prop.mock.accessCount(), 1);
+  assert.strictEqual(prop.mock.accesses[0].type, 'get');
+  assert.strictEqual(prop.mock.accesses[0].value, 123);
+
+  obj.foo = 456;
+  assert.strictEqual(obj.foo, 456);
+  assert.strictEqual(prop.mock.accessCount(), 3);
+  assert.strictEqual(prop.mock.accesses[1].type, 'set');
+  assert.strictEqual(prop.mock.accesses[1].value, 456);
+  assert.strictEqual(prop.mock.accesses[2].type, 'get');
+  assert.strictEqual(prop.mock.accesses[2].value, 456);
+
+  prop.mock.restore();
+  assert.strictEqual(obj.foo, 123);
+});
+
+test('spies on a symbol property', (t) => {
+  const symbol = Symbol('foo');
+  const obj = { [symbol]: 123 };
+  const prop = t.mock.property(obj, symbol, 456);
+
+  assert.strictEqual(obj[symbol], 456);
+  assert.strictEqual(prop.mock.accessCount(), 1);
+
+  obj[symbol] = 789;
+  assert.strictEqual(obj[symbol], 789);
+  assert.strictEqual(prop.mock.accessCount(), 3);
+  assert.strictEqual(prop.mock.accesses[1].type, 'set');
+  assert.strictEqual(prop.mock.accesses[2].type, 'get');
+
+  prop.mock.restore();
+  assert.strictEqual(obj[symbol], 123);
+});
+
+test('changes mocked property value dynamically', (t) => {
+  const obj = { foo: 1 };
+
+  const prop = t.mock.property(obj, 'foo', 2);
+  assert.strictEqual(obj.foo, 2);
+  assert.strictEqual(prop.mock.accessCount(), 1);
+
+  prop.mock.mockImplementation(99);
+  assert.strictEqual(obj.foo, 99);
+  assert.strictEqual(prop.mock.accessCount(), 3);
+
+  prop.mock.mockImplementationOnce(42);
+  assert.strictEqual(obj.foo, 42);
+  assert.strictEqual(obj.foo, 99);
+  assert.strictEqual(prop.mock.accessCount(), 5);
+
+  assert.throws(() => {
+    prop.mock.mockImplementationOnce(55, 4);
+  }, /The value of "onAccess" is out of range\. It must be >= 5/);
+
+  prop.mock.mockImplementationOnce(100, 5);
+  prop.mock.mockImplementationOnce(200, 6);
+  assert.strictEqual(obj.foo, 100);
+  assert.strictEqual(obj.foo, 200);
+  assert.strictEqual(obj.foo, 99);
+  assert.strictEqual(prop.mock.accessCount(), 8);
+
+  prop.mock.mockImplementationOnce(555, 10);
+  assert.strictEqual(obj.foo, 99);
+  assert.strictEqual(obj.foo, 99);
+  assert.strictEqual(obj.foo, 555);
+
+  prop.mock.mockImplementation(undefined);
+  assert.strictEqual(obj.foo, undefined);
+});
+
+test('mocks property value to undefined', (t) => {
+  const obj = { foo: 123 };
+  const prop = t.mock.property(obj, 'foo', undefined);
+
+  assert.strictEqual(obj.foo, undefined);
+  assert.strictEqual(prop.mock.accessCount(), 1);
+  assert.strictEqual(prop.mock.accesses[0].type, 'get');
+  assert.strictEqual(prop.mock.accesses[0].value, undefined);
+
+  prop.mock.restore();
+  assert.strictEqual(obj.foo, 123);
+});
+
+test('resetAccesses does not affect property value', (t) => {
+  const obj = { foo: 1 };
+  const prop = t.mock.property(obj, 'foo', 2);
+
+  obj.foo = 5;
+  assert.strictEqual(obj.foo, 5);
+  assert.strictEqual(prop.mock.accessCount(), 2);
+
+  prop.mock.resetAccesses();
+  assert.strictEqual(obj.foo, 5);
+  assert.strictEqual(prop.mock.accessCount(), 1);
+  assert.strictEqual(prop.mock.accesses[0].type, 'get');
+});
+
+test('restores original property value', (t) => {
+  const obj = {
+    foo: 10,
+  };
+
+  const prop = t.mock.property(obj, 'foo', 20);
+  assert.strictEqual(obj.foo, 20);
+
+  prop.mock.restore();
+  assert.strictEqual(obj.foo, 10);
+});
+
+test('throws if setting a non-writable property', (t) => {
+  const obj = {};
+  Object.defineProperty(obj, 'bar', {
+    value: 1,
+    writable: false,
+    configurable: true,
+    enumerable: true,
+  });
+
+  t.mock.property(obj, 'bar', 2);
+  assert.strictEqual(obj.bar, 2);
+
+  assert.throws(() => { obj.bar = 3; }, { code: 'ERR_INVALID_ARG_VALUE' });
+});
+
+test('throws if property does not exist', (t) => {
+  assert.throws(() => {
+    t.mock.property({}, 'doesNotExist', 1);
+  }, { code: 'ERR_INVALID_ARG_VALUE' });
+});
+
+test('throws if object is null', (t) => {
+  assert.throws(() => {
+    t.mock.property(null, 'foo', 1);
+  }, { code: 'ERR_INVALID_ARG_TYPE' });
+});
+
+test('local property mocks are auto restored after the test finishes', async (t) => {
+  const obj = { foo: 111, bar: 222 };
+
+  assert.strictEqual(obj.foo, 111);
+  assert.strictEqual(obj.bar, 222);
+
+  t.mock.property(obj, 'foo', 888);
+
+  assert.strictEqual(obj.foo, 888);
+  assert.strictEqual(obj.bar, 222);
+
+  t.beforeEach(common.mustCallAtLeast(() => {
+    assert.strictEqual(obj.foo, 888);
+    assert.strictEqual(obj.bar, 222);
+  }));
+
+  t.afterEach(common.mustCallAtLeast(() => {
+    assert.strictEqual(obj.foo, 888);
+    assert.strictEqual(obj.bar, 999);
+  }));
+
+  await t.test('creates property mocks that are auto restored', (t) => {
+    t.mock.property(obj, 'bar', 999);
+
+    assert.strictEqual(obj.foo, 888);
+    assert.strictEqual(obj.bar, 999);
+  });
+
+  assert.strictEqual(obj.foo, 888);
+  assert.strictEqual(obj.bar, 222);
 });

@@ -4,9 +4,9 @@ const common = require('../common');
 
 const bench = common.createBenchmark(main, {
   len: [4, 8, 16, 32],
-  n: [1e5]
+  n: [1e5],
 }, {
-  flags: ['--expose-internals', '--no-warnings']
+  flags: ['--expose-internals', '--no-warnings'],
 });
 
 function main({ len, n }) {
@@ -16,7 +16,7 @@ function main({ len, n }) {
   const kOnHeadersComplete = HTTPParser.kOnHeadersComplete | 0;
   const kOnBody = HTTPParser.kOnBody | 0;
   const kOnMessageComplete = HTTPParser.kOnMessageComplete | 0;
-  const CRLF = '\r\n';
+  const kMaxHeaderPairs = 2000;
 
   function processHeader(header, n) {
     const parser = newParser(REQUEST);
@@ -24,14 +24,15 @@ function main({ len, n }) {
     bench.start();
     for (let i = 0; i < n; i++) {
       parser.execute(header, 0, header.length);
-      parser.initialize(REQUEST, {});
+      parser.initialize(REQUEST, {}, 0, 0, undefined, kMaxHeaderPairs);
     }
     bench.end(n);
   }
 
   function newParser(type) {
     const parser = new HTTPParser();
-    parser.initialize(type, {});
+    // Direct parsers bypass cleanParser(); use its production default.
+    parser.initialize(type, {}, 0, 0, undefined, kMaxHeaderPairs);
 
     parser.headers = [];
 
@@ -43,12 +44,12 @@ function main({ len, n }) {
     return parser;
   }
 
-  let header = `GET /hello HTTP/1.1${CRLF}Content-Type: text/plain${CRLF}`;
+  let header = `GET /hello HTTP/1.1\r\nContent-Type: text/plain\r\n`;
 
   for (let i = 0; i < len; i++) {
-    header += `X-Filler${i}: ${Math.random().toString(36).substr(2)}${CRLF}`;
+    header += `X-Filler${i}: ${Math.random().toString(36).substring(2)}\r\n`;
   }
-  header += CRLF;
+  header += '\r\n';
 
   processHeader(Buffer.from(header), n);
 }

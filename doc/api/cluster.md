@@ -17,10 +17,10 @@ server ports.
 ```mjs
 import cluster from 'node:cluster';
 import http from 'node:http';
-import { cpus } from 'node:os';
+import { availableParallelism } from 'node:os';
 import process from 'node:process';
 
-const numCPUs = cpus().length;
+const numCPUs = availableParallelism();
 
 if (cluster.isPrimary) {
   console.log(`Primary ${process.pid} is running`);
@@ -48,8 +48,7 @@ if (cluster.isPrimary) {
 ```cjs
 const cluster = require('node:cluster');
 const http = require('node:http');
-const numCPUs = require('node:os').cpus().length;
-const process = require('node:process');
+const numCPUs = require('node:os').availableParallelism();
 
 if (cluster.isPrimary) {
   console.log(`Primary ${process.pid} is running`);
@@ -273,7 +272,7 @@ process of the number of HTTP requests received by the workers:
 ```mjs
 import cluster from 'node:cluster';
 import http from 'node:http';
-import { cpus } from 'node:os';
+import { availableParallelism } from 'node:os';
 import process from 'node:process';
 
 if (cluster.isPrimary) {
@@ -292,7 +291,7 @@ if (cluster.isPrimary) {
   }
 
   // Start workers and listen for messages containing notifyRequest
-  const numCPUs = cpus().length;
+  const numCPUs = availableParallelism();
   for (let i = 0; i < numCPUs; i++) {
     cluster.fork();
   }
@@ -317,7 +316,7 @@ if (cluster.isPrimary) {
 ```cjs
 const cluster = require('node:cluster');
 const http = require('node:http');
-const process = require('node:process');
+const numCPUs = require('node:os').availableParallelism();
 
 if (cluster.isPrimary) {
 
@@ -335,7 +334,6 @@ if (cluster.isPrimary) {
   }
 
   // Start workers and listen for messages containing notifyRequest
-  const numCPUs = require('node:os').cpus().length;
   for (let i = 0; i < numCPUs; i++) {
     cluster.fork();
   }
@@ -450,7 +448,7 @@ if (cluster.isPrimary) {
 added: v6.0.0
 -->
 
-* {boolean}
+* Type: {boolean}
 
 This property is `true` if the worker exited due to `.disconnect()`.
 If the worker exited any other way, it is `false`. If the
@@ -477,7 +475,7 @@ worker.kill();
 added: v0.8.0
 -->
 
-* {integer}
+* Type: {integer}
 
 Each new worker is given its own unique id, this id is stored in the
 `id`.
@@ -491,6 +489,8 @@ While a worker is alive, this is the key that indexes it in
 added: v0.11.14
 -->
 
+* Returns: {boolean}
+
 This function returns `true` if the worker is connected to its primary via its
 IPC channel, `false` otherwise. A worker is connected to its primary after it
 has been created. It is disconnected after the `'disconnect'` event is emitted.
@@ -501,16 +501,18 @@ has been created. It is disconnected after the `'disconnect'` event is emitted.
 added: v0.11.14
 -->
 
+* Returns: {boolean}
+
 This function returns `true` if the worker's process has terminated (either
 because of exiting or being signaled). Otherwise, it returns `false`.
 
 ```mjs
 import cluster from 'node:cluster';
 import http from 'node:http';
-import { cpus } from 'node:os';
+import { availableParallelism } from 'node:os';
 import process from 'node:process';
 
-const numCPUs = cpus().length;
+const numCPUs = availableParallelism();
 
 if (cluster.isPrimary) {
   console.log(`Primary ${process.pid} is running`);
@@ -540,8 +542,7 @@ if (cluster.isPrimary) {
 ```cjs
 const cluster = require('node:cluster');
 const http = require('node:http');
-const numCPUs = require('node:os').cpus().length;
-const process = require('node:process');
+const numCPUs = require('node:os').availableParallelism();
 
 if (cluster.isPrimary) {
   console.log(`Primary ${process.pid} is running`);
@@ -595,7 +596,7 @@ it is [`kill()`][].
 added: v0.7.0
 -->
 
-* {ChildProcess}
+* Type: {ChildProcess}
 
 All workers are created using [`child_process.fork()`][], the returned object
 from this function is stored as `.process`. In a worker, the global `process`
@@ -850,6 +851,8 @@ added: v0.8.1
 deprecated: v16.0.0
 -->
 
+> Stability: 0 - Deprecated
+
 Deprecated alias for [`cluster.isPrimary`][].
 
 ## `cluster.isPrimary`
@@ -858,7 +861,7 @@ Deprecated alias for [`cluster.isPrimary`][].
 added: v16.0.0
 -->
 
-* {boolean}
+* Type: {boolean}
 
 True if the process is a primary. This is determined
 by the `process.env.NODE_UNIQUE_ID`. If `process.env.NODE_UNIQUE_ID` is
@@ -870,7 +873,7 @@ undefined, then `isPrimary` is `true`.
 added: v0.6.0
 -->
 
-* {boolean}
+* Type: {boolean}
 
 True if the process is not a primary (it is the negation of `cluster.isPrimary`).
 
@@ -917,7 +920,7 @@ changes:
     description: The `stdio` option is supported now.
 -->
 
-* {Object}
+* Type: {Object}
   * `execArgv` {string\[]} List of string arguments passed to the Node.js
     executable. **Default:** `process.execArgv`.
   * `exec` {string} File path to worker file. **Default:** `process.argv[1]`.
@@ -933,7 +936,8 @@ changes:
     **Default:** `false`.
   * `stdio` {Array} Configures the stdio of forked processes. Because the
     cluster module relies on IPC to function, this configuration must contain an
-    `'ipc'` entry. When this option is provided, it overrides `silent`.
+    `'ipc'` entry. When this option is provided, it overrides `silent`. See
+    [`child_process.spawn()`][]'s [`stdio`][].
   * `uid` {number} Sets the user identity of the process. (See setuid(2).)
   * `gid` {number} Sets the group identity of the process. (See setgid(2).)
   * `inspectPort` {number|Function} Sets inspector port of worker.
@@ -958,6 +962,8 @@ changes:
     pr-url: https://github.com/nodejs/node/pull/7838
     description: The `stdio` option is supported now.
 -->
+
+> Stability: 0 - Deprecated
 
 Deprecated alias for [`.setupPrimary()`][].
 
@@ -1021,7 +1027,7 @@ This can only be called from the primary process.
 added: v0.7.0
 -->
 
-* {Object}
+* Type: {Object}
 
 A reference to the current worker object. Not available in the primary process.
 
@@ -1055,7 +1061,7 @@ if (cluster.isPrimary) {
 added: v0.7.0
 -->
 
-* {Object}
+* Type: {Object}
 
 A hash that stores the active worker objects, keyed by `id` field. This makes it
 easy to loop through all the workers. It is only available in the primary
@@ -1088,6 +1094,7 @@ for (const worker of Object.values(cluster.workers)) {
 [`.setupPrimary()`]: #clustersetupprimarysettings
 [`ChildProcess.send()`]: child_process.md#subprocesssendmessage-sendhandle-options-callback
 [`child_process.fork()`]: child_process.md#child_processforkmodulepath-args-options
+[`child_process.spawn()`]: child_process.md#child_processspawncommand-args-options
 [`child_process` event: `'exit'`]: child_process.md#event-exit
 [`child_process` event: `'message'`]: child_process.md#event-message
 [`cluster.isPrimary`]: #clusterisprimary
@@ -1096,5 +1103,6 @@ for (const worker of Object.values(cluster.workers)) {
 [`kill()`]: process.md#processkillpid-signal
 [`process` event: `'message'`]: process.md#event-message
 [`server.close()`]: net.md#event-close
+[`stdio`]: child_process.md#optionsstdio
 [`worker.exitedAfterDisconnect`]: #workerexitedafterdisconnect
 [`worker_threads`]: worker_threads.md

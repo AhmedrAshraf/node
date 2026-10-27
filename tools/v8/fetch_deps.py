@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # Copyright 2017 the V8 project authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
@@ -8,9 +8,6 @@ Use this script to fetch all dependencies for V8 to run build_gn.py.
 
 Usage: fetch_deps.py <v8-path>
 """
-
-# for py2/py3 compatibility
-from __future__ import print_function
 
 import os
 import subprocess
@@ -26,6 +23,14 @@ GCLIENT_SOLUTION = [
     "custom_deps" : {
       # These deps are already part of Node.js.
       "v8/base/trace_event/common"            : None,
+      "v8/third_party/abseil-cpp"             : None,
+      "v8/third_party/dragonbox/src"          : None,
+      "v8/third_party/fp16/src"               : None,
+      "v8/third_party/fast_float/src"         : None,
+      "v8/third_party/highway/src"            : None,
+      "v8/third_party/jinja2"                 : None,
+      "v8/third_party/markupsafe"             : None,
+      "v8/third_party/simdutf"                : None,
       # These deps are unnecessary for building.
       "v8/test/benchmarks/data"               : None,
       "v8/testing/gmock"                      : None,

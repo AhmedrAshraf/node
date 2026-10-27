@@ -4,7 +4,16 @@
 const common = require('../common');
 
 common.skipIfInspectorDisabled();
-common.skipIfWorker(); // https://github.com/nodejs/node/issues/22767
+// Needs two things a perfetto build does not have: the inspector NodeTracing
+// domain, and recording for a category enabled after the session started.
+common.skipIfPerfettoEnabled();
+
+const { isMainThread } = require('worker_threads');
+
+if (!isMainThread) {
+  // https://github.com/nodejs/node/issues/22767
+  common.skip('This test only works on a main thread');
+}
 
 const { internalBinding } = require('internal/test/binding');
 
@@ -37,10 +46,10 @@ async function test() {
 
   const events = [];
   let tracingComplete = false;
-  session.on('NodeTracing.dataCollected', (n) => {
-    assert.ok(n && n.params && n.params.value);
+  session.on('NodeTracing.dataCollected', common.mustCall((n) => {
+    assert.ok(n?.params?.value);
     events.push(...n.params.value);  // append the events.
-  });
+  }, 2));
   session.on('NodeTracing.tracingComplete', () => tracingComplete = true);
 
   trace(kBeforeEvent, 'foo', 'test1', 0, 'test');

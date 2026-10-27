@@ -5,12 +5,12 @@ const zlib = require('zlib');
 const bench = common.createBenchmark(main, {
   method: ['inflate', 'inflateSync'],
   inputLen: [1024],
-  n: [4e5]
+  n: [4e5],
 });
 
 function main({ n, method, inputLen }) {
   // Default method value for tests.
-  method = method || 'inflate';
+  method ||= 'inflate';
   const chunk = zlib.deflateSync(Buffer.alloc(inputLen, 'a'));
 
   let i = 0;

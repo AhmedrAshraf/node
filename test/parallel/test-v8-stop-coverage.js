@@ -1,19 +1,19 @@
 'use strict';
 
-if (!process.features.inspector) return;
-
-require('../common');
+const common = require('../common');
 const fixtures = require('../common/fixtures');
 const tmpdir = require('../common/tmpdir');
 const assert = require('assert');
 const fs = require('fs');
-const { spawnSync } = require('child_process');
+const { spawnSyncAndExitWithoutError } = require('../common/child_process');
+
+common.skipIfInspectorDisabled();
 
 tmpdir.refresh();
 const intervals = 20;
 
 {
-  const output = spawnSync(process.execPath, [
+  const { child } = spawnSyncAndExitWithoutError(process.execPath, [
     '-r',
     fixtures.path('v8-coverage', 'stop-coverage'),
     '-r',
@@ -27,8 +27,7 @@ const intervals = 20;
       TEST_INTERVALS: intervals
     },
   });
-  console.log(output.stderr.toString());
-  assert.strictEqual(output.status, 0);
+  console.log(child.stderr.toString());
   const coverageFiles = fs.readdirSync(tmpdir.path);
   assert.strictEqual(coverageFiles.length, 0);
 }

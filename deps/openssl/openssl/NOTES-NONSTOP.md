@@ -19,22 +19,30 @@ About c99 compiler
 
 The c99 compiler is required for building OpenSSL from source. While c11
 may work, it has not been broadly tested. c99 is the only compiler
-prerequisite needed to build OpenSSL 3.0 on this platform. You should also
-have the FLOSS package installed on your system. The ITUGLIB FLOSS package
-is the only FLOSS variant that has been broadly tested.
+prerequisite needed to build OpenSSL 3.0 on this platform.
 
 Threading Models
 ----------------
 
-OpenSSL can be built using unthreaded, POSIX User Threads (PUT), or Standard
-POSIX Threads (SPT). Select the following build configuration for each on
-the TNS/X (L-Series) platform:
+OpenSSL can be built either using the POSIX User Threads (PUT) threading model,
+or with threading support disabled. Select the following build configuration
+for each on the TNS/X (L-Series) platform:
 
- * `nonstop-nsx` or default will select an unthreaded build.
+ * `nonstop-nsx` or default will select an unthreaded 32-bit build.
+ * `nonstop-nsx_64` selects an unthreaded 64-bit memory and file length build.
+ * `nonstop-nsx_64_klt` selects the 64-bit memory and file length KLT build.
  * `nonstop-nsx_put` selects the PUT build.
- * `nonstop-nsx_64_put` selects the 64 bit file length PUT build.
- * `nonstop-nsx_spt_floss` selects the SPT build with FLOSS. FLOSS is
-   required for SPT builds because of a known hang when using SPT on its own.
+ * `nonstop-nsx_64_put` selects the 64-bit memory and file length PUT build.
+
+The KLT threading model is a newly released model on NonStop. It implements
+kernel-level threading. KLT provides much closer threading to what OpenSSL
+uses for Linux-like threading models. KLT continues to use the pthread library
+API. There is no supported 32-bit or Guardian builds for KLT.
+
+The SPT threading model is no longer supported as of OpenSSL 3.2.
+
+The PUT model is incompatible with the QUIC capability. This capability should
+be disabled when building with PUT.
 
 ### TNS/E Considerations
 
@@ -43,6 +51,15 @@ instead of `nsx` in the set above.
 
 You cannot build for TNS/E for FIPS, so you must specify the `no-fips`
 option to `./Configure`.
+
+TNS/E has moved to a limited support state, so fixes for this platform will not
+be guaranteed in future.
+
+Secure Memory
+-------------
+
+The mechanism used by OpenSSL for secure memory is not supported on NonStop.
+Use the `no-secure-memory` option when running `Configure`.
 
 About Prefix and OpenSSLDir
 ---------------------------
@@ -102,12 +119,9 @@ correctly, you also need the `COMP_ROOT` set, as in:
 
 `COMP_ROOT` needs to be in Windows form.
 
-`Configure` must specify the `no-makedepend` option otherwise errors will
-result when running the build because the c99 cross-compiler does not support
-the `gcc -MT` option. An example of a `Configure` command to be run from the
-OpenSSL directory is:
+An example of a `Configure` command to be run from the OpenSSL directory is:
 
-    ./Configure nonstop-nsx_64 no-makedepend --with-rand-seed=rdcpu
+    ./Configure nonstop-nsx_64 --with-rand-seed=rdcpu
 
 Do not forget to include any OpenSSL cross-compiling prefix and certificate
 options when creating your libraries.
@@ -131,9 +145,7 @@ update this list:
 - nonstop-nsx_64_put
 
 **Note:** Cross-compile builds for TNS/E have not been attempted, but should
-follow the same considerations as for TNS/X above. SPT builds generally require
-FLOSS, which is not available for workstation builds. As a result, SPT builds
-of OpenSSL cannot be cross-compiled.
+follow the same considerations as for TNS/X above.
 
 Also see the NSDEE discussion below for more historical information.
 
@@ -155,7 +167,7 @@ the following variables. The following set of compiler defines are required:
 ### Optional Build Variables
 
     DBGFLAG="--debug"
-    CIPHENABLES="enable-ssl3 enable-ssl3-method enable-weak-ssl-ciphers enable-rc4"
+    CIPHENABLES="enable-weak-ssl-ciphers enable-rc4"
 
 ### Internal Known TNS/X to TNS/E Cross Compile Variables
 
@@ -186,6 +198,9 @@ following variables:
         if [ -n "$PRE_RELEASE_TAG" ]; then
             PRE_RELEASE_TAG="-$PRE_RELEASE_TAG"
         fi
+        if [ -n "$BUILD_METADATA" ]; then
+            BUILD_METADATA="+$BUILD_METADATA"
+        fi
         echo "$MAJOR.$MINOR.$PATCH$PRE_RELEASE_TAG$BUILD_METADATA" |\
             sed -e 's/[-.+]/_/g'
         )
@@ -194,19 +209,13 @@ Example Configure Targets
 -------------------------
 
 For OSS targets, the main DLL names will be `libssl.so` and `libcrypto.so`.
-For GUARDIAN targets, DLL names will be `ssl` and `crypto`. The following
-assumes that your PWD is set according to your installation standards.
+The following assumes that your PWD is set according to your installation
+standards.
 
     ./Configure nonstop-nsx           --prefix=${PWD} \
         --openssldir=${PWD}/ssl no-threads \
         --with-rand-seed=rdcpu ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
-    ./Configure nonstop-nsx_g         --prefix=${PWD} \
-        --openssldir=${PWD}/ssl no-threads \
-        --with-rand-seed=rdcpu ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
     ./Configure nonstop-nsx_put       --prefix=${PWD} \
-        --openssldir=${PWD}/ssl threads "-D_REENTRANT" \
-        --with-rand-seed=rdcpu ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
-    ./Configure nonstop-nsx_spt_floss --prefix=${PWD} \
         --openssldir=${PWD}/ssl threads "-D_REENTRANT" \
         --with-rand-seed=rdcpu ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
     ./Configure nonstop-nsx_64        --prefix=${PWD} \
@@ -214,9 +223,6 @@ assumes that your PWD is set according to your installation standards.
         --with-rand-seed=rdcpu ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
     ./Configure nonstop-nsx_64_put    --prefix=${PWD} \
         --openssldir=${PWD}/ssl threads "-D_REENTRANT" \
-        --with-rand-seed=rdcpu ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
-    ./Configure nonstop-nsx_g_tandem  --prefix=${PWD} \
-        --openssldir=${PWD}/ssl no-threads \
         --with-rand-seed=rdcpu ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
 
     ./Configure nonstop-nse           --prefix=${PWD} \
@@ -228,15 +234,9 @@ assumes that your PWD is set according to your installation standards.
     ./Configure nonstop-nse_put       --prefix=${PWD} \
         --openssldir=${PWD}/ssl threads "-D_REENTRANT" \
         --with-rand-seed=egd ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
-    ./Configure nonstop-nse_spt_floss --prefix=${PWD} \
-        --openssldir=${PWD}/ssl threads "-D_REENTRANT" \
-        --with-rand-seed=egd ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
     ./Configure nonstop-nse_64        --prefix=${PWD} \
         --openssldir=${PWD}/ssl no-threads \
         --with-rand-seed=egd ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
     ./Configure nonstop-nse_64_put    --prefix=${PWD} \
         --openssldir=${PWD}/ssl threads "-D_REENTRANT"
-        --with-rand-seed=egd ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}
-    ./Configure nonstop-nse_g_tandem  --prefix=${PWD} \
-        --openssldir=${PWD}/ssl no-threads \
         --with-rand-seed=egd ${CIPHENABLES} ${DBGFLAG} ${SYSTEMLIBS}

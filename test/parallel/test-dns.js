@@ -90,6 +90,22 @@ assert(existing.length > 0);
   });
 }
 
+{
+  // Out-of-range ports, which should throw a clean error.
+  const invalidPorts = [2 ** 16, 2 ** 32, 2 ** 64];
+  invalidPorts.forEach((port) => {
+    assert.throws(
+      () => {
+        dns.setServers([`1.2.3.4:${port}`]);
+      },
+      {
+        name: 'RangeError',
+        code: 'ERR_SOCKET_BAD_PORT'
+      }
+    );
+  });
+}
+
 const goog = [
   '8.8.8.8',
   '8.8.4.4',
@@ -130,11 +146,18 @@ const portsExpected = [
   '4.4.4.4',
   '2001:4860:4860::8888',
   '103.238.225.181:666',
-  '[fe80::483a:5aff:fee6:1f04]:666',
-  'fe80::483a:5aff:fee6:1f04',
 ];
 dns.setServers(ports);
 assert.deepStrictEqual(dns.getServers(), portsExpected);
+
+// Port 0 means "use the default port" for c-ares.
+dns.setServers(['4.4.4.4:0', '[2001:4860:4860::8888]:0']);
+assert.deepStrictEqual(dns.getServers(), ['4.4.4.4', '2001:4860:4860::8888']);
+
+// Link-local IPv6 addresses require a zone index (scope id) to be usable;
+// c-ares drops link-local servers configured without one.
+dns.setServers(['[fe80::483a:5aff:fee6:1f04]%eth0']);
+assert.deepStrictEqual(dns.getServers(), []);
 
 dns.setServers([]);
 assert.deepStrictEqual(dns.getServers(), []);
@@ -193,16 +216,13 @@ assert.deepStrictEqual(dns.getServers(), []);
 
 // dns.lookup should accept falsey values
 {
-  const checkCallback = (err, address, family) => {
-    assert.ifError(err);
-    assert.strictEqual(address, null);
-    assert.strictEqual(family, 4);
-  };
-
   ['', null, undefined, 0, NaN].forEach(async (value) => {
-    const res = await dnsPromises.lookup(value);
-    assert.deepStrictEqual(res, { address: null, family: 4 });
-    dns.lookup(value, common.mustCall(checkCallback));
+    await assert.rejects(dnsPromises.lookup(value), {
+      code: 'ERR_INVALID_ARG_VALUE',
+    });
+    assert.throws(() => dns.lookup(value, common.mustNotCall()), {
+      code: 'ERR_INVALID_ARG_VALUE',
+    });
   });
 }
 
@@ -239,42 +259,112 @@ assert.throws(() => dns.lookup('nodejs.org', 4), {
   name: 'TypeError'
 });
 
-dns.lookup('', { family: 4, hints: 0 }, common.mustCall());
+assert.throws(() => dns.lookup('', {
+  family: 'nodejs.org',
+  hints: dns.ADDRCONFIG | dns.V4MAPPED | dns.ALL,
+}), {
+  code: 'ERR_INVALID_ARG_TYPE',
+  name: 'TypeError'
+});
 
-dns.lookup('', {
-  family: 6,
-  hints: dns.ADDRCONFIG
-}, common.mustCall());
+assert.throws(() => {
+  dns.lookup('', { family: 4, hints: 0 }, common.mustNotCall());
+}, {
+  code: 'ERR_INVALID_ARG_VALUE',
+});
 
-dns.lookup('', { hints: dns.V4MAPPED }, common.mustCall());
+assert.throws(() => {
+  dns.lookup('', {
+    family: 6,
+    hints: dns.ADDRCONFIG
+  }, common.mustNotCall());
+}, {
+  code: 'ERR_INVALID_ARG_VALUE',
+});
 
-dns.lookup('', {
-  hints: dns.ADDRCONFIG | dns.V4MAPPED
-}, common.mustCall());
+assert.throws(() => {
+  dns.lookup('', { hints: dns.V4MAPPED }, common.mustNotCall());
+}, {
+  code: 'ERR_INVALID_ARG_VALUE',
+});
 
-dns.lookup('', {
-  hints: dns.ALL
-}, common.mustCall());
+assert.throws(() => {
+  dns.lookup('', {
+    hints: dns.ADDRCONFIG | dns.V4MAPPED
+  }, common.mustNotCall());
+}, {
+  code: 'ERR_INVALID_ARG_VALUE',
+});
 
-dns.lookup('', {
-  hints: dns.V4MAPPED | dns.ALL
-}, common.mustCall());
+assert.throws(() => {
+  dns.lookup('', {
+    hints: dns.ALL
+  }, common.mustNotCall());
+}, {
+  code: 'ERR_INVALID_ARG_VALUE',
+});
 
-dns.lookup('', {
-  hints: dns.ADDRCONFIG | dns.V4MAPPED | dns.ALL
-}, common.mustCall());
+assert.throws(() => {
+  dns.lookup('', {
+    hints: dns.V4MAPPED | dns.ALL
+  }, common.mustNotCall());
+}, {
+  code: 'ERR_INVALID_ARG_VALUE',
+});
+
+assert.throws(() => {
+  dns.lookup('', {
+    hints: dns.ADDRCONFIG | dns.V4MAPPED | dns.ALL
+  }, common.mustNotCall());
+}, {
+  code: 'ERR_INVALID_ARG_VALUE',
+});
+
+assert.throws(() => {
+  dns.lookup('', {
+    hints: dns.ADDRCONFIG | dns.V4MAPPED | dns.ALL,
+    family: 'IPv4'
+  }, common.mustNotCall());
+}, {
+  code: 'ERR_INVALID_ARG_VALUE',
+});
+
+assert.throws(() => {
+  dns.lookup('', {
+    hints: dns.ADDRCONFIG | dns.V4MAPPED | dns.ALL,
+    family: 'IPv6'
+  }, common.mustNotCall());
+}, {
+  code: 'ERR_INVALID_ARG_VALUE',
+});
 
 (async function() {
-  await dnsPromises.lookup('', { family: 4, hints: 0 });
-  await dnsPromises.lookup('', { family: 6, hints: dns.ADDRCONFIG });
-  await dnsPromises.lookup('', { hints: dns.V4MAPPED });
-  await dnsPromises.lookup('', { hints: dns.ADDRCONFIG | dns.V4MAPPED });
-  await dnsPromises.lookup('', { hints: dns.ALL });
-  await dnsPromises.lookup('', { hints: dns.V4MAPPED | dns.ALL });
-  await dnsPromises.lookup('', {
-    hints: dns.ADDRCONFIG | dns.V4MAPPED | dns.ALL
+  await assert.rejects(dnsPromises.lookup('', { family: 4, hints: 0 }), {
+    code: 'ERR_INVALID_ARG_VALUE',
   });
-  await dnsPromises.lookup('', { verbatim: true });
+  await assert.rejects(dnsPromises.lookup('', { family: 6, hints: dns.ADDRCONFIG }), {
+    code: 'ERR_INVALID_ARG_VALUE',
+  });
+  await assert.rejects(dnsPromises.lookup('', { hints: dns.V4MAPPED }), {
+    code: 'ERR_INVALID_ARG_VALUE',
+  });
+  await assert.rejects(dnsPromises.lookup('', { hints: dns.ADDRCONFIG | dns.V4MAPPED }), {
+    code: 'ERR_INVALID_ARG_VALUE',
+  });
+  await assert.rejects(dnsPromises.lookup('', { hints: dns.ALL }), {
+    code: 'ERR_INVALID_ARG_VALUE',
+  });
+  await assert.rejects(dnsPromises.lookup('', { hints: dns.V4MAPPED | dns.ALL }), {
+    code: 'ERR_INVALID_ARG_VALUE',
+  });
+  await assert.rejects(dnsPromises.lookup('', {
+    hints: dns.ADDRCONFIG | dns.V4MAPPED | dns.ALL
+  }), {
+    code: 'ERR_INVALID_ARG_VALUE',
+  });
+  await assert.rejects(dnsPromises.lookup('', { order: 'verbatim' }), {
+    code: 'ERR_INVALID_ARG_VALUE',
+  });
 })().then(common.mustCall());
 
 {
@@ -307,7 +397,25 @@ dns.lookup('', {
   }, err);
 }
 
-const portErr = (port) => {
+{
+  const invalidAddress = Buffer.from('127.0.0.1');
+  const err = {
+    code: 'ERR_INVALID_ARG_TYPE',
+    name: 'TypeError',
+    message: 'The "address" argument must be of type string. ' +
+    'Received an instance of Buffer'
+  };
+
+  assert.throws(() => {
+    dnsPromises.lookupService(invalidAddress, 0);
+  }, err);
+
+  assert.throws(() => {
+    dns.lookupService(invalidAddress, 0, common.mustNotCall());
+  }, err);
+}
+
+[null, undefined, 65538, 'test', NaN, Infinity, Symbol(), 0n, true, false, '', () => {}, {}].forEach((port) => {
   const err = {
     code: 'ERR_SOCKET_BAD_PORT',
     name: 'RangeError'
@@ -320,8 +428,7 @@ const portErr = (port) => {
   assert.throws(() => {
     dns.lookupService('0.0.0.0', port, common.mustNotCall());
   }, err);
-};
-[null, undefined, 65538, 'test', NaN, Infinity, Symbol(), 0n, true, false, '', () => {}, {}].forEach(portErr);
+});
 
 assert.throws(() => {
   dns.lookupService('0.0.0.0', 80, null);
@@ -331,23 +438,23 @@ assert.throws(() => {
 });
 
 {
-  dns.resolveMx('foo.onion', function(err) {
+  dns.resolveMx('foo.onion', common.mustCall((err) => {
     assert.strictEqual(err.code, 'ENOTFOUND');
     assert.strictEqual(err.syscall, 'queryMx');
     assert.strictEqual(err.hostname, 'foo.onion');
     assert.strictEqual(err.message, 'queryMx ENOTFOUND foo.onion');
-  });
+  }));
 }
 
 {
   const cases = [
     { method: 'resolveAny',
       answers: [
-        { type: 'A', address: '1.2.3.4', ttl: 3333333333 },
-        { type: 'AAAA', address: '::42', ttl: 3333333333 },
-        { type: 'MX', priority: 42, exchange: 'foobar.com', ttl: 3333333333 },
-        { type: 'NS', value: 'foobar.org', ttl: 3333333333 },
-        { type: 'PTR', value: 'baz.org', ttl: 3333333333 },
+        { type: 'A', address: '1.2.3.4', ttl: 0 },
+        { type: 'AAAA', address: '::42', ttl: 0 },
+        { type: 'MX', priority: 42, exchange: 'foobar.com', ttl: 0 },
+        { type: 'NS', value: 'foobar.org', ttl: 0 },
+        { type: 'PTR', value: 'baz.org', ttl: 0 },
         {
           type: 'SOA',
           nsname: 'ns1.example.com',
@@ -362,11 +469,11 @@ assert.throws(() => {
 
     { method: 'resolve4',
       options: { ttl: true },
-      answers: [ { type: 'A', address: '1.2.3.4', ttl: 3333333333 } ] },
+      answers: [ { type: 'A', address: '1.2.3.4', ttl: 0 } ] },
 
     { method: 'resolve6',
       options: { ttl: true },
-      answers: [ { type: 'AAAA', address: '::42', ttl: 3333333333 } ] },
+      answers: [ { type: 'AAAA', address: '::42', ttl: 0 } ] },
 
     { method: 'resolveSoa',
       answers: [

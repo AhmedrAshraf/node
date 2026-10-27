@@ -86,5 +86,20 @@ assert.deepStrictEqual(
 
 // Test that it doesn't crash
 {
-  buffer.transcode(new buffer.SlowBuffer(1), 'utf16le', 'ucs2');
+  buffer.transcode(new buffer.Buffer.allocUnsafeSlow(1), 'utf16le', 'ucs2');
+}
+
+// An odd-length ucs2 source must only convert whole 2-byte code units and
+// leave the trailing byte untouched, without reading or writing past the
+// conversion buffer. Lengths are chosen to exercise both the on-stack and the
+// heap-allocated code paths.
+for (const len of [2049, 4099]) {
+  const src = Buffer.alloc(len, 0x61);
+  const wholeUnits = src.subarray(0, len - 1);
+  for (const to of ['latin1', 'ascii']) {
+    assert.deepStrictEqual(
+      buffer.transcode(src, 'utf16le', to),
+      buffer.transcode(wholeUnits, 'utf16le', to),
+      `ucs2->${to} odd length ${len}`);
+  }
 }

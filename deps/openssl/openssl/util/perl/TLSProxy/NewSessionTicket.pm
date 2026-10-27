@@ -1,4 +1,4 @@
-# Copyright 2016 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2016-2026 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -12,18 +12,74 @@ package TLSProxy::NewSessionTicket;
 use vars '@ISA';
 push @ISA, 'TLSProxy::Message';
 
+sub new_dtls
+{
+    my $class = shift;
+
+    my ($server,
+        $msgseq,
+        $msgfraglen,
+        $msgfragoffs,
+        $data,
+        $records,
+        $startoffset,
+        $message_frag_lens) = @_;
+
+    return $class->init(
+        1,
+        $server,
+        $msgseq,
+        $msgfraglen,
+        $msgfragoffs,
+        $data,
+        $records,
+        $startoffset,
+        $message_frag_lens
+    )
+}
+
 sub new
 {
     my $class = shift;
+
     my ($server,
         $data,
         $records,
         $startoffset,
         $message_frag_lens) = @_;
 
-    my $self = $class->SUPER::new(
+    return $class->init(
+        0,
         $server,
-        TLSProxy::Message::MT_NEW_SESSION_TICKET,
+        0, # msgseq
+        0, # msgfrag
+        0, # $msgfragoffs
+        $data,
+        $records,
+        $startoffset,
+        $message_frag_lens
+    )
+}
+
+sub init{
+    my $class = shift;
+    my ($isdtls,
+        $server,
+        $msgseq,
+        $msgfraglen,
+        $msgfragoffs,
+        $data,
+        $records,
+        $startoffset,
+        $message_frag_lens) = @_;
+
+    my $self = $class->SUPER::new(
+        $isdtls,
+        $server,
+        TLSProxy::Message::MT_NEW_SESSION_TICKET(),
+        $msgseq,
+        $msgfraglen,
+        $msgfragoffs,
         $data,
         $records,
         $startoffset,

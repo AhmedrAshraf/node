@@ -2,9 +2,6 @@
   "api-basics.any.js": {
     "requires": ["small-icu"]
   },
-  "api-invalid-label.any.js": {
-    "skip": "location is not defined"
-  },
   "textdecoder-fatal-streaming.any.js": {
     "requires": ["small-icu"]
   },
@@ -40,7 +37,10 @@
     "skip": "The iso-8859-16 encoding is not supported"
   },
   "idlharness.any.js": {
-    "skip": "No implementation of TextDecoderStream and TextEncoderStream"
+    "requires": ["small-icu"]
+  },
+  "idlharness-shadowrealm.window.js": {
+    "skip": "ShadowRealm support is not enabled"
   },
   "replacement-encodings.any.js": {
     "skip": "decoding-helpers.js needs XMLHttpRequest"
@@ -50,6 +50,9 @@
   },
   "streams/decode-ignore-bom.any.js": {
     "requires": ["small-icu"]
+  },
+  "streams/invalid-realm.window.js": {
+    "skip": "document is not defined"
   },
   "streams/realms.window.js": {
     "skip": "window is not defined"
@@ -62,13 +65,6 @@
   },
   "streams/decode-utf8.any.js": {
     "requires": ["small-icu"]
-  },
-  "streams/decode-bad-chunks.any.js": {
-    "fail": {
-      "expected": [
-        "chunk of type undefined should error the stream"
-      ]
-    }
   },
   "streams/decode-non-utf8.any.js": {
     "requires": ["full-icu"]
@@ -91,9 +87,12 @@
     "requires": ["small-icu"]
   },
   "single-byte-decoder.window.js": {
-    "skip": "location is not defined"
+    "skip": "document is not defined"
   },
   "textdecoder-eof.any.js": {
     "requires": ["small-icu"]
+  },
+  "unsupported-labels.window.js": {
+    "skip": "document is not defined"
   }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2011-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2011-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -21,10 +21,10 @@
  */
 
 static int bn_x931_derive_pi(BIGNUM *pi, const BIGNUM *Xpi, BN_CTX *ctx,
-                             BN_GENCB *cb)
+    BN_GENCB *cb)
 {
     int i = 0, is_prime;
-    if (!BN_copy(pi, Xpi))
+    if (BN_copy(pi, Xpi) == NULL)
         return 0;
     if (!BN_is_odd(pi) && !BN_add_word(pi, 1))
         return 0;
@@ -51,9 +51,9 @@ static int bn_x931_derive_pi(BIGNUM *pi, const BIGNUM *Xpi, BN_CTX *ctx,
  */
 
 int BN_X931_derive_prime_ex(BIGNUM *p, BIGNUM *p1, BIGNUM *p2,
-                            const BIGNUM *Xp, const BIGNUM *Xp1,
-                            const BIGNUM *Xp2, const BIGNUM *e, BN_CTX *ctx,
-                            BN_GENCB *cb)
+    const BIGNUM *Xp, const BIGNUM *Xp1,
+    const BIGNUM *Xp2, const BIGNUM *e, BN_CTX *ctx,
+    BN_GENCB *cb)
 {
     int ret = 0;
 
@@ -121,7 +121,7 @@ int BN_X931_derive_prime_ex(BIGNUM *p, BIGNUM *p1, BIGNUM *p2,
     for (;;) {
         int i = 1;
         BN_GENCB_call(cb, 0, i++);
-        if (!BN_copy(pm1, p))
+        if (BN_copy(pm1, p) == NULL)
             goto err;
         if (!BN_sub_word(pm1, 1))
             goto err;
@@ -147,7 +147,7 @@ int BN_X931_derive_prime_ex(BIGNUM *p, BIGNUM *p1, BIGNUM *p2,
 
     ret = 1;
 
- err:
+err:
 
     BN_CTX_end(ctx);
 
@@ -176,7 +176,7 @@ int BN_X931_generate_Xpq(BIGNUM *Xp, BIGNUM *Xq, int nbits, BN_CTX *ctx)
      * exceeded.
      */
     if (!BN_priv_rand_ex(Xp, nbits, BN_RAND_TOP_TWO, BN_RAND_BOTTOM_ANY, 0,
-                         ctx))
+            ctx))
         return 0;
 
     BN_CTX_start(ctx);
@@ -186,7 +186,7 @@ int BN_X931_generate_Xpq(BIGNUM *Xp, BIGNUM *Xq, int nbits, BN_CTX *ctx)
 
     for (i = 0; i < 1000; i++) {
         if (!BN_priv_rand_ex(Xq, nbits, BN_RAND_TOP_TWO, BN_RAND_BOTTOM_ANY, 0,
-                             ctx))
+                ctx))
             goto err;
 
         /* Check that |Xp - Xq| > 2^(nbits - 100) */
@@ -203,7 +203,7 @@ int BN_X931_generate_Xpq(BIGNUM *Xp, BIGNUM *Xq, int nbits, BN_CTX *ctx)
 
     return 0;
 
- err:
+err:
     BN_CTX_end(ctx);
     return 0;
 }
@@ -217,9 +217,9 @@ int BN_X931_generate_Xpq(BIGNUM *Xp, BIGNUM *Xq, int nbits, BN_CTX *ctx)
  */
 
 int BN_X931_generate_prime_ex(BIGNUM *p, BIGNUM *p1, BIGNUM *p2,
-                              BIGNUM *Xp1, BIGNUM *Xp2,
-                              const BIGNUM *Xp,
-                              const BIGNUM *e, BN_CTX *ctx, BN_GENCB *cb)
+    BIGNUM *Xp1, BIGNUM *Xp2,
+    const BIGNUM *Xp,
+    const BIGNUM *e, BN_CTX *ctx, BN_GENCB *cb)
 {
     int ret = 0;
 
@@ -240,9 +240,8 @@ int BN_X931_generate_prime_ex(BIGNUM *p, BIGNUM *p1, BIGNUM *p2,
 
     ret = 1;
 
- error:
+error:
     BN_CTX_end(ctx);
 
     return ret;
-
 }

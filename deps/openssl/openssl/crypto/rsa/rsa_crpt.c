@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2020 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2025 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -31,25 +31,25 @@ int RSA_size(const RSA *r)
 }
 
 int RSA_public_encrypt(int flen, const unsigned char *from, unsigned char *to,
-                       RSA *rsa, int padding)
+    RSA *rsa, int padding)
 {
     return rsa->meth->rsa_pub_enc(flen, from, to, rsa, padding);
 }
 
 int RSA_private_encrypt(int flen, const unsigned char *from,
-                        unsigned char *to, RSA *rsa, int padding)
+    unsigned char *to, RSA *rsa, int padding)
 {
     return rsa->meth->rsa_priv_enc(flen, from, to, rsa, padding);
 }
 
 int RSA_private_decrypt(int flen, const unsigned char *from,
-                        unsigned char *to, RSA *rsa, int padding)
+    unsigned char *to, RSA *rsa, int padding)
 {
     return rsa->meth->rsa_priv_dec(flen, from, to, rsa, padding);
 }
 
 int RSA_public_decrypt(int flen, const unsigned char *from, unsigned char *to,
-                       RSA *rsa, int padding)
+    RSA *rsa, int padding)
 {
     return rsa->meth->rsa_pub_dec(flen, from, to, rsa, padding);
 }
@@ -61,32 +61,20 @@ int RSA_flags(const RSA *r)
 
 void RSA_blinding_off(RSA *rsa)
 {
-    BN_BLINDING_free(rsa->blinding);
-    rsa->blinding = NULL;
     rsa->flags &= ~RSA_FLAG_BLINDING;
     rsa->flags |= RSA_FLAG_NO_BLINDING;
 }
 
 int RSA_blinding_on(RSA *rsa, BN_CTX *ctx)
 {
-    int ret = 0;
-
-    if (rsa->blinding != NULL)
-        RSA_blinding_off(rsa);
-
-    rsa->blinding = RSA_setup_blinding(rsa, ctx);
-    if (rsa->blinding == NULL)
-        goto err;
 
     rsa->flags |= RSA_FLAG_BLINDING;
     rsa->flags &= ~RSA_FLAG_NO_BLINDING;
-    ret = 1;
- err:
-    return ret;
+    return 1;
 }
 
 static BIGNUM *rsa_get_public_exp(const BIGNUM *d, const BIGNUM *p,
-                                  const BIGNUM *q, BN_CTX *ctx)
+    const BIGNUM *q, BN_CTX *ctx)
 {
     BIGNUM *ret = NULL, *r0, *r1, *r2;
 
@@ -108,7 +96,7 @@ static BIGNUM *rsa_get_public_exp(const BIGNUM *d, const BIGNUM *p,
         goto err;
 
     ret = BN_mod_inverse(NULL, d, r0, ctx);
- err:
+err:
     BN_CTX_end(ctx);
     return ret;
 }
@@ -129,7 +117,7 @@ BN_BLINDING *RSA_setup_blinding(RSA *rsa, BN_CTX *in_ctx)
     BN_CTX_start(ctx);
     e = BN_CTX_get(ctx);
     if (e == NULL) {
-        ERR_raise(ERR_LIB_RSA, ERR_R_MALLOC_FAILURE);
+        ERR_raise(ERR_LIB_RSA, ERR_R_BN_LIB);
         goto err;
     }
 
@@ -147,13 +135,13 @@ BN_BLINDING *RSA_setup_blinding(RSA *rsa, BN_CTX *in_ctx)
         BIGNUM *n = BN_new();
 
         if (n == NULL) {
-            ERR_raise(ERR_LIB_RSA, ERR_R_MALLOC_FAILURE);
+            ERR_raise(ERR_LIB_RSA, ERR_R_BN_LIB);
             goto err;
         }
         BN_with_flags(n, rsa->n, BN_FLG_CONSTTIME);
 
         ret = BN_BLINDING_create_param(NULL, e, n, ctx, rsa->meth->bn_mod_exp,
-                                       rsa->_method_mod_n);
+            rsa->_method_mod_n);
         /* We MUST free n before any further use of rsa->n */
         BN_free(n);
     }
@@ -162,9 +150,7 @@ BN_BLINDING *RSA_setup_blinding(RSA *rsa, BN_CTX *in_ctx)
         goto err;
     }
 
-    BN_BLINDING_set_current_thread(ret);
-
- err:
+err:
     BN_CTX_end(ctx);
     if (ctx != in_ctx)
         BN_CTX_free(ctx);

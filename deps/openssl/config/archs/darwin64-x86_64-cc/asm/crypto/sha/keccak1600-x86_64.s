@@ -420,10 +420,12 @@ _SHA3_squeeze:
 
 
 	shrq	$3,%rcx
-	movq	%rdi,%r8
+	movq	%rdi,%r9
 	movq	%rsi,%r12
 	movq	%rdx,%r13
 	movq	%rcx,%r14
+	btl	$0,%r8d
+	jc	L$next_block
 	jmp	L$oop_squeeze
 
 .p2align	5
@@ -431,8 +433,8 @@ L$oop_squeeze:
 	cmpq	$8,%r13
 	jb	L$tail_squeeze
 
-	movq	(%r8),%rax
-	leaq	8(%r8),%r8
+	movq	(%r9),%rax
+	leaq	8(%r9),%r9
 	movq	%rax,(%r12)
 	leaq	8(%r12),%r12
 	subq	$8,%r13
@@ -440,14 +442,14 @@ L$oop_squeeze:
 
 	subq	$1,%rcx
 	jnz	L$oop_squeeze
-
+L$next_block:
 	call	KeccakF1600
-	movq	%rdi,%r8
+	movq	%rdi,%r9
 	movq	%r14,%rcx
 	jmp	L$oop_squeeze
 
 L$tail_squeeze:
-	movq	%r8,%rsi
+	movq	%r9,%rsi
 	movq	%r12,%rdi
 	movq	%r13,%rcx
 .byte	0xf3,0xa4
@@ -462,6 +464,7 @@ L$done_squeeze:
 	.byte	0xf3,0xc3
 
 
+.section	__DATA,__const
 .p2align	8
 .quad	0,0,0,0,0,0,0,0
 
@@ -491,4 +494,4 @@ iotas:
 .quad	0x0000000080000001
 .quad	0x8000000080008008
 
-.byte	75,101,99,99,97,107,45,49,54,48,48,32,97,98,115,111,114,98,32,97,110,100,32,115,113,117,101,101,122,101,32,102,111,114,32,120,56,54,95,54,52,44,32,67,82,89,80,84,79,71,65,77,83,32,98,121,32,60,97,112,112,114,111,64,111,112,101,110,115,115,108,46,111,114,103,62,0
+.byte	75,101,99,99,97,107,45,49,54,48,48,32,97,98,115,111,114,98,32,97,110,100,32,115,113,117,101,101,122,101,32,102,111,114,32,120,56,54,95,54,52,44,32,67,82,89,80,84,79,71,65,77,83,32,98,121,32,60,104,116,116,112,115,58,47,47,103,105,116,104,117,98,46,99,111,109,47,100,111,116,45,97,115,109,62,0

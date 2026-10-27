@@ -7,10 +7,11 @@
 
 #include "src/base/flags.h"
 #include "src/compiler/opcodes.h"
-#include "src/compiler/types.h"
+#include "src/compiler/turbofan-types.h"
 
 #define TYPER_SUPPORTED_MACHINE_BINOP_LIST(V) \
   V(Int32Add)                                 \
+  V(Int32LessThanOrEqual)                     \
   V(Int64Add)                                 \
   V(Int32Sub)                                 \
   V(Int64Sub)                                 \
@@ -19,6 +20,7 @@
   V(Uint64Div)                                \
   V(Uint32LessThan)                           \
   V(Uint32LessThanOrEqual)                    \
+  V(Uint64LessThan)                           \
   V(Uint64LessThanOrEqual)                    \
   V(Word32And)                                \
   V(Word32Equal)                              \
@@ -54,6 +56,8 @@ class V8_EXPORT_PRIVATE OperationTyper {
   Type ToPrimitive(Type type);
   Type ToNumber(Type type);
   Type ToNumberConvertBigInt(Type type);
+  Type ToBigInt(Type type);
+  Type ToBigIntConvertNumber(Type type);
   Type ToNumeric(Type type);
   Type ToBoolean(Type type);
 
@@ -77,6 +81,8 @@ class V8_EXPORT_PRIVATE OperationTyper {
   TYPER_SUPPORTED_MACHINE_BINOP_LIST(DECLARE_METHOD)
 #undef DECLARE_METHOD
 
+  Type ChangeUint32ToUint64(Type input);
+
   // Comparison operators.
   Type SameValue(Type lhs, Type rhs);
   Type SameValueNumbersOnly(Type lhs, Type rhs);
@@ -86,6 +92,8 @@ class V8_EXPORT_PRIVATE OperationTyper {
   Type CheckBounds(Type index, Type length);
   Type CheckFloat64Hole(Type type);
   Type CheckNumber(Type type);
+  Type CheckNumberOrUndefined(Type type);
+  Type CheckNumberFitsInt32(Type type);
   Type ConvertTaggedHoleToUndefined(Type type);
 
   Type TypeTypeGuard(const Operator* sigma_op, Type input);
@@ -98,7 +106,6 @@ class V8_EXPORT_PRIVATE OperationTyper {
 
   Type singleton_false() const { return singleton_false_; }
   Type singleton_true() const { return singleton_true_; }
-  Type singleton_the_hole() const { return singleton_the_hole_; }
 
  private:
   using ComparisonOutcome = base::Flags<ComparisonOutcomeFlags>;
@@ -126,7 +133,6 @@ class V8_EXPORT_PRIVATE OperationTyper {
   Type singleton_zero_string_;
   Type singleton_false_;
   Type singleton_true_;
-  Type singleton_the_hole_;
   Type signed32ish_;
   Type unsigned32ish_;
   Type singleton_empty_string_;

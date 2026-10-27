@@ -1,20 +1,19 @@
 'use strict';
 
-if (!process.features.inspector) return;
-
-require('../common');
+const common = require('../common');
 const fixtures = require('../common/fixtures');
 const tmpdir = require('../common/tmpdir');
 const assert = require('assert');
 const fs = require('fs');
-const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawnSyncAndExitWithoutError } = require('../common/child_process');
+
+common.skipIfInspectorDisabled();
 
 tmpdir.refresh();
 const intervals = 40;
 // Outputs coverage when v8.takeCoverage() is invoked.
 {
-  const output = spawnSync(process.execPath, [
+  const { child } = spawnSyncAndExitWithoutError(process.execPath, [
     '-r',
     fixtures.path('v8-coverage', 'take-coverage'),
     fixtures.path('v8-coverage', 'interval'),
@@ -26,13 +25,12 @@ const intervals = 40;
       TEST_INTERVALS: intervals
     },
   });
-  console.log(output.stderr.toString());
-  assert.strictEqual(output.status, 0);
+  console.log(child.stderr.toString());
   const coverageFiles = fs.readdirSync(tmpdir.path);
 
   let coverages = [];
   for (const coverageFile of coverageFiles) {
-    const coverage = require(path.join(tmpdir.path, coverageFile));
+    const coverage = require(tmpdir.resolve(coverageFile));
     for (const result of coverage.result) {
       if (result.url.includes('/interval')) {
         coverages.push({

@@ -5,7 +5,8 @@ const bench = common.createBenchmark(main, {
   type: ['buf', 'asc', 'utf'],
   sendchunklen: [256, 32 * 1024, 128 * 1024, 16 * 1024 * 1024],
   recvbuflen: [0, 64 * 1024, 1024 * 1024],
-  recvbufgenfn: ['true', 'false']
+  recvbufgenfn: ['true', 'false'],
+  recordlen: [1024, 4096, 16384],
 });
 
 const fixtures = require('../../test/common/fixtures');
@@ -14,7 +15,8 @@ let recvbuf;
 let received = 0;
 const tls = require('tls');
 
-function main({ dur, type, sendchunklen, recvbuflen, recvbufgenfn }) {
+function main({ dur, type, sendchunklen, recvbuflen, recvbufgenfn,
+                recordlen }) {
   if (isFinite(recvbuflen) && recvbuflen > 0)
     recvbuf = Buffer.alloc(recvbuflen);
 
@@ -68,12 +70,13 @@ function main({ dur, type, sendchunklen, recvbuflen, recvbufgenfn }) {
         buffer,
         callback: function(nread, buf) {
           received += nread;
-        }
-      }
+        },
+      },
     };
   }
 
   const server = tls.createServer(options, (socket) => {
+    socket.setMaxSendFragment(recordlen);
     socket.on('data', (buf) => {
       socket.on('drain', write);
       write();

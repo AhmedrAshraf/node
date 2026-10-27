@@ -1,3 +1,4 @@
+// Flags: --no-warnings
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -42,6 +43,7 @@ let zlibPairs = [
   [zlib.Gzip, zlib.Unzip],
   [zlib.DeflateRaw, zlib.InflateRaw],
   [zlib.BrotliCompress, zlib.BrotliDecompress],
+  [zlib.ZstdCompress, zlib.ZstdDecompress],
 ];
 
 // How fast to trickle through the slowstream
@@ -230,3 +232,11 @@ testKeys.forEach(common.mustCall((file) => {
     }, trickle.length));
   }, chunkSize.length));
 }, testKeys.length));
+
+{
+  // Instantiating without `new` is End-of-Life (DEP0184).
+  assert.throws(() => zlib.Gzip(), {
+    name: 'TypeError',
+    message: /Class constructor Gzip cannot be invoked without 'new'/,
+  });
+}

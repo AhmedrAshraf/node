@@ -46,9 +46,10 @@ LIBS{noinst}=$LIBDEFAULT $LIBCOMMON
 # providers/implementations/include), which includes crypto/*_platform.h
 # (present in include), which in turn may include very internal header
 # files in crypto/, so let's have a common include list for them all.
-$COMMON_INCLUDES=../crypto ../include implementations/include common/include
+$COMMON_INCLUDES=../crypto ../include implementations/include common/include \
+    fips/include
 
-INCLUDE[$LIBCOMMON]=$COMMON_INCLUDES
+INCLUDE[$LIBCOMMON]=.. $COMMON_INCLUDES
 INCLUDE[$LIBFIPS]=.. $COMMON_INCLUDES
 INCLUDE[$LIBLEGACY]=.. $COMMON_INCLUDES
 INCLUDE[$LIBDEFAULT]=.. $COMMON_INCLUDES
@@ -65,6 +66,10 @@ DEPEND[$LIBCOMMON]{weak}=../libcrypto
 SOURCE[$LIBFIPS]=$LIBCOMMON
 DEPEND[$LIBLEGACY]=$LIBCOMMON
 DEPEND[$LIBDEFAULT]=$LIBCOMMON
+
+IF[{- $target{needs_c99_snprintf_compat} -}]
+  SOURCE[$LIBFIPS]=../crypto/msvc2013_snprintf.c
+ENDIF
 
 #
 # Default provider stuff
@@ -175,3 +180,7 @@ ENDIF
 # include all the object files that are needed.
 $NULLGOAL=../libcrypto
 SOURCE[$NULLGOAL]=nullprov.c prov_running.c
+
+# template library, not used anywhere. It's merely here to ensure that the object files build
+LIBS{noinst}=libtemplate.a
+INCLUDE[libtemplate.a]=.. $COMMON_INCLUDES

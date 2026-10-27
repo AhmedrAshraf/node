@@ -4,6 +4,7 @@
 
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
+#include "aliased_buffer.h"
 #include "base_object.h"
 #include "util.h"
 
@@ -22,20 +23,10 @@ struct PropInfo {
   SnapshotIndex index;  // In the snapshot
 };
 
-#define SERIALIZABLE_OBJECT_TYPES(V)                                           \
-  V(fs_binding_data, fs::BindingData)                                          \
-  V(v8_binding_data, v8_utils::BindingData)                                    \
-  V(blob_binding_data, BlobBindingData)                                        \
-  V(process_binding_data, process::BindingData)                                \
-  V(util_weak_reference, util::WeakReference)
-
-enum class EmbedderObjectType : uint8_t {
-#define V(PropertyName, NativeType) k_##PropertyName,
-  SERIALIZABLE_OBJECT_TYPES(V)
-#undef V
-};
-
 typedef size_t SnapshotIndex;
+
+bool WithoutCodeCache(const SnapshotFlags& flags);
+bool WithoutCodeCache(const SnapshotConfig& config);
 
 // When serializing an embedder object, we'll serialize the native states
 // into a chunk that can be mapped into a subclass of InternalFieldInfoBase,
@@ -50,25 +41,22 @@ struct InternalFieldInfoBase {
   EmbedderObjectType type;
   size_t length;
 
-  template <typename T>
+  template <std::derived_from<InternalFieldInfoBase> T>
   static T* New(EmbedderObjectType type) {
-    static_assert(std::is_base_of_v<InternalFieldInfoBase, T> ||
-                      std::is_same_v<InternalFieldInfoBase, T>,
-                  "Can only accept InternalFieldInfoBase subclasses");
     void* buf = ::operator new[](sizeof(T));
     T* result = new (buf) T;
+    // Zero the padding to make the bytes handed to V8 reproducible. Must come
+    // after the placement new, or -flifetime-dse drops it as a dead store.
+    // https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html#index-fno-lifetime-dse
+    memset(static_cast<void*>(result), 0, sizeof(T));
     result->type = type;
     result->length = sizeof(T);
     return result;
   }
 
-  template <typename T>
+  template <std::derived_from<InternalFieldInfoBase> T>
+    requires std::is_trivially_copyable_v<T>
   T* Copy() const {
-    static_assert(std::is_base_of_v<InternalFieldInfoBase, T> ||
-                      std::is_same_v<InternalFieldInfoBase, T>,
-                  "Can only accept InternalFieldInfoBase subclasses");
-    static_assert(std::is_trivially_copyable_v<T>,
-                  "Can only memcpy trivially copyable class");
     void* buf = ::operator new[](sizeof(T));
     T* result = new (buf) T;
     memcpy(result, this, sizeof(T));
@@ -78,6 +66,14 @@ struct InternalFieldInfoBase {
   void Delete() { ::operator delete[](this); }
 
   InternalFieldInfoBase() = default;
+};
+
+struct EmbedderTypeInfo {
+  enum class MemoryMode : uint8_t { kBaseObject, kCppGC };
+  EmbedderTypeInfo(EmbedderObjectType t, MemoryMode m) : type(t), mode(m) {}
+  EmbedderTypeInfo() = default;
+  EmbedderObjectType type;
+  MemoryMode mode;
 };
 
 // An interface for snapshotable native objects to inherit from.
@@ -98,10 +94,10 @@ struct InternalFieldInfoBase {
 //   in the object.
 class SnapshotableObject : public BaseObject {
  public:
-  SnapshotableObject(Environment* env,
+  SnapshotableObject(Realm* realm,
                      v8::Local<v8::Object> wrap,
                      EmbedderObjectType type);
-  const char* GetTypeNameChars() const;
+  std::string GetTypeName() const;
 
   // If returns false, the object will not be serialized.
   virtual bool PrepareForSerialization(v8::Local<v8::Context> context,
@@ -127,13 +123,46 @@ class SnapshotableObject : public BaseObject {
 v8::StartupData SerializeNodeContextInternalFields(v8::Local<v8::Object> holder,
                                                    int index,
                                                    void* env);
+v8::StartupData SerializeNodeContextData(v8::Local<v8::Context> holder,
+                                         int index,
+                                         void* env);
 void DeserializeNodeInternalFields(v8::Local<v8::Object> holder,
                                    int index,
                                    v8::StartupData payload,
                                    void* env);
+void DeserializeNodeContextData(v8::Local<v8::Context> holder,
+                                int index,
+                                v8::StartupData payload,
+                                void* env);
 void SerializeSnapshotableObjects(Realm* realm,
                                   v8::SnapshotCreator* creator,
                                   RealmSerializeInfo* info);
+
+#define DCHECK_IS_SNAPSHOT_SLOT(index) DCHECK_EQ(index, BaseObject::kSlot)
+
+namespace mksnapshot {
+class BindingData : public SnapshotableObject {
+ public:
+  struct InternalFieldInfo : public node::InternalFieldInfoBase {
+    AliasedBufferIndex is_building_snapshot_buffer;
+  };
+
+  BindingData(Realm* realm,
+              v8::Local<v8::Object> obj,
+              InternalFieldInfo* info = nullptr);
+  SET_BINDING_ID(mksnapshot_binding_data)
+  SERIALIZABLE_OBJECT_METHODS()
+
+  void MemoryInfo(MemoryTracker* tracker) const override;
+  SET_SELF_SIZE(BindingData)
+  SET_MEMORY_INFO_NAME(BindingData)
+
+ private:
+  AliasedUint8Array is_building_snapshot_buffer_;
+  InternalFieldInfo* internal_field_info_ = nullptr;
+};
+}  // namespace mksnapshot
+
 }  // namespace node
 
 #endif  // defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS

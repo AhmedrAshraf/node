@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2020 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2016-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -14,7 +14,13 @@
  * can be found at https://blake2.net.
  */
 
+#if !defined(OSSL_PROVIDERS_IMPLEMENTATIONS_DIGESTS_BLAKE2_IMPL_H)
+#define OSSL_PROVIDERS_IMPLEMENTATIONS_DIGESTS_BLAKE2_IMPL_H
+
 #include <string.h>
+
+#include <openssl/e_os2.h>
+
 #include "internal/endian.h"
 
 static ossl_inline uint32_t load32(const uint8_t *src)
@@ -27,9 +33,9 @@ static ossl_inline uint32_t load32(const uint8_t *src)
         return w;
     } else {
         uint32_t w = ((uint32_t)src[0])
-                   | ((uint32_t)src[1] <<  8)
-                   | ((uint32_t)src[2] << 16)
-                   | ((uint32_t)src[3] << 24);
+            | ((uint32_t)src[1] << 8)
+            | ((uint32_t)src[2] << 16)
+            | ((uint32_t)src[3] << 24);
         return w;
     }
 }
@@ -44,13 +50,13 @@ static ossl_inline uint64_t load64(const uint8_t *src)
         return w;
     } else {
         uint64_t w = ((uint64_t)src[0])
-                   | ((uint64_t)src[1] <<  8)
-                   | ((uint64_t)src[2] << 16)
-                   | ((uint64_t)src[3] << 24)
-                   | ((uint64_t)src[4] << 32)
-                   | ((uint64_t)src[5] << 40)
-                   | ((uint64_t)src[6] << 48)
-                   | ((uint64_t)src[7] << 56);
+            | ((uint64_t)src[1] << 8)
+            | ((uint64_t)src[2] << 16)
+            | ((uint64_t)src[3] << 24)
+            | ((uint64_t)src[4] << 32)
+            | ((uint64_t)src[5] << 40)
+            | ((uint64_t)src[6] << 48)
+            | ((uint64_t)src[7] << 56);
         return w;
     }
 }
@@ -88,11 +94,11 @@ static ossl_inline void store64(uint8_t *dst, uint64_t w)
 static ossl_inline uint64_t load48(const uint8_t *src)
 {
     uint64_t w = ((uint64_t)src[0])
-               | ((uint64_t)src[1] <<  8)
-               | ((uint64_t)src[2] << 16)
-               | ((uint64_t)src[3] << 24)
-               | ((uint64_t)src[4] << 32)
-               | ((uint64_t)src[5] << 40);
+        | ((uint64_t)src[1] << 8)
+        | ((uint64_t)src[2] << 16)
+        | ((uint64_t)src[3] << 24)
+        | ((uint64_t)src[4] << 32)
+        | ((uint64_t)src[5] << 40);
     return w;
 }
 
@@ -100,11 +106,11 @@ static ossl_inline void store48(uint8_t *dst, uint64_t w)
 {
     uint8_t *p = (uint8_t *)dst;
     p[0] = (uint8_t)w;
-    p[1] = (uint8_t)(w>>8);
-    p[2] = (uint8_t)(w>>16);
-    p[3] = (uint8_t)(w>>24);
-    p[4] = (uint8_t)(w>>32);
-    p[5] = (uint8_t)(w>>40);
+    p[1] = (uint8_t)(w >> 8);
+    p[2] = (uint8_t)(w >> 16);
+    p[3] = (uint8_t)(w >> 24);
+    p[4] = (uint8_t)(w >> 32);
+    p[5] = (uint8_t)(w >> 40);
 }
 
 static ossl_inline uint32_t rotr32(const uint32_t w, const unsigned int c)
@@ -116,3 +122,5 @@ static ossl_inline uint64_t rotr64(const uint64_t w, const unsigned int c)
 {
     return (w >> c) | (w << (64 - c));
 }
+
+#endif /* !defined(OSSL_PROVIDERS_IMPLEMENTATIONS_DIGESTS_BLAKE2_IMPL_H) */

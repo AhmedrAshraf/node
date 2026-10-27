@@ -2,22 +2,33 @@
 
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
-#include "aliased_buffer.h"
+#include "node_concepts.h"
 #include "v8-profiler.h"
 
 #include <uv.h>
 
 #include <limits>
+#include <memory>
 #include <queue>
 #include <stack>
 #include <string>
 #include <unordered_map>
+#include <vector>
+
+namespace v8 {
+class BackingStore;
+}
 
 namespace node {
 
+class CppgcMixin;
+
+template <typename T>
+struct MallocedBuffer;
+
 // Set the node name of a MemoryRetainer to klass
 #define SET_MEMORY_INFO_NAME(Klass)                                            \
-  inline std::string MemoryInfoName() const override { return #Klass; }
+  inline const char* MemoryInfoName() const override { return #Klass; }
 
 // Set the self size of a MemoryRetainer to the stack-allocated size of a
 // certain class
@@ -68,7 +79,7 @@ class CleanupHookCallback;
  *     }
  *
  *     // Or use SET_MEMORY_INFO_NAME(ExampleRetainer)
- *     std::string MemoryInfoName() const override {
+ *     const char* MemoryInfoName() const override {
  *       return "ExampleRetainer";
  *     }
  *
@@ -119,7 +130,7 @@ class MemoryRetainer {
   // where all the edges start from the node of the current retainer,
   // and point to the nodes as specified by tracker->Track* calls.
   virtual void MemoryInfo(MemoryTracker* tracker) const = 0;
-  virtual std::string MemoryInfoName() const = 0;
+  virtual const char* MemoryInfoName() const = 0;
   virtual size_t SelfSize() const = 0;
 
   virtual v8::Local<v8::Object> WrappedObject() const {
@@ -127,10 +138,38 @@ class MemoryRetainer {
   }
 
   virtual bool IsRootNode() const { return false; }
+  virtual bool IsCppgcWrapper() const { return false; }
   virtual v8::EmbedderGraph::Node::Detachedness GetDetachedness() const {
     return v8::EmbedderGraph::Node::Detachedness::kUnknown;
   }
 };
+
+/**
+ * MemoryRetainerTraits allows defining a custom memory info for a
+ * class that can not be modified to implement the MemoryRetainer interface.
+ *
+ * Example:
+ *
+ * template <>
+ * struct MemoryRetainerTraits<ExampleRetainer> {
+ *   static void MemoryInfo(MemoryTracker* tracker,
+ *                         const ExampleRetainer& value) {
+ *     tracker->TrackField("another_retainer", value.another_retainer_);
+ *   }
+ *   static const char* MemoryInfoName(const ExampleRetainer& value) {
+ *     return "ExampleRetainer";
+ *   }
+ *   static size_t SelfSize(const ExampleRetainer& value) {
+ *     return sizeof(value);
+ *   }
+ * };
+ *
+ * This creates the following graph:
+ *   Node / ExampleRetainer
+ *    |> another_retainer :: Node / AnotherRetainerClass
+ */
+template <typename T, typename = void>
+struct MemoryRetainerTraits {};
 
 class MemoryTracker {
  public:
@@ -193,10 +232,7 @@ class MemoryTracker {
   inline void TrackField(const char* edge_name,
                          const std::basic_string<T>& value,
                          const char* node_name = nullptr);
-  template <typename T,
-            typename test_for_number = typename std::
-                enable_if<std::numeric_limits<T>::is_specialized, bool>::type,
-            typename dummy = bool>
+  template <NumericValue T>
   inline void TrackField(const char* edge_name,
                          const T& value,
                          const char* node_name = nullptr);
@@ -231,13 +267,11 @@ class MemoryTracker {
   inline void TrackInlineField(const char* edge_name,
                                const uv_async_t& value,
                                const char* node_name = nullptr);
-  template <class NativeT, class V8T>
-  inline void TrackField(const char* edge_name,
-                         const AliasedBufferBase<NativeT, V8T>& value,
-                         const char* node_name = nullptr);
 
   // Put a memory container into the graph, create an edge from
   // the current node if there is one on the stack.
+  inline void Track(const CppgcMixin* retainer,
+                    const char* edge_name = nullptr);
   inline void Track(const MemoryRetainer* retainer,
                     const char* edge_name = nullptr);
 
@@ -252,20 +286,38 @@ class MemoryTracker {
   inline void TrackInlineField(const MemoryRetainer* retainer,
                                const char* edge_name = nullptr);
 
+  // MemoryRetainerTraits implementation helpers.
+  template <typename T>
+  inline void TraitTrack(const T& retainer, const char* edge_name = nullptr);
+  template <typename T>
+  inline void TraitTrackInline(const T& retainer,
+                               const char* edge_name = nullptr);
+
   inline v8::EmbedderGraph* graph() { return graph_; }
   inline v8::Isolate* isolate() { return isolate_; }
 
-  inline explicit MemoryTracker(v8::Isolate* isolate,
-                                v8::EmbedderGraph* graph)
-    : isolate_(isolate), graph_(graph) {}
+  inline explicit MemoryTracker(v8::Isolate* isolate, v8::EmbedderGraph* graph);
+  inline ~MemoryTracker();
+
+  // Can be passed to Track() if it is not desirable
+  // to create a strong edge between nodes, i.e. when
+  // the node should be added to the graph and the
+  // parent node is "tracking" the target node but
+  // not directly keeping it alive.
+  static const char* const kWeakEdge;
 
  private:
   typedef std::unordered_map<const MemoryRetainer*, MemoryRetainerNode*>
       NodeMap;
 
-  inline MemoryRetainerNode* CurrentNode() const;
+  inline void AdjustCurrentNodeSize(int diff);
+  inline v8::EmbedderGraph::Node* CurrentNode() const;
+  inline MemoryRetainerNode* AddNode(const CppgcMixin* retainer,
+                                     const char* edge_name = nullptr);
   inline MemoryRetainerNode* AddNode(const MemoryRetainer* retainer,
                                      const char* edge_name = nullptr);
+  inline MemoryRetainerNode* PushNode(const CppgcMixin* retainer,
+                                      const char* edge_name = nullptr);
   inline MemoryRetainerNode* PushNode(const MemoryRetainer* retainer,
                                       const char* edge_name = nullptr);
   inline MemoryRetainerNode* AddNode(const char* node_name,
@@ -275,11 +327,16 @@ class MemoryTracker {
                                       size_t size,
                                       const char* edge_name = nullptr);
   inline void PopNode();
+  inline void AddEdge(v8::EmbedderGraph::Node* from,
+                      v8::EmbedderGraph::Node* to,
+                      const char* edge_name = nullptr);
 
   v8::Isolate* isolate_;
   v8::EmbedderGraph* graph_;
   std::stack<MemoryRetainerNode*> node_stack_;
   NodeMap seen_;
+  // Placeholder nodes for cppgc wrappers; the graph only owns their JS nodes.
+  std::vector<std::unique_ptr<MemoryRetainerNode>> cppgc_nodes_;
 };
 
 }  // namespace node

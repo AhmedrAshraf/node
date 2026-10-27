@@ -21,10 +21,15 @@ class Hash final : public BaseObject {
   SET_MEMORY_INFO_NAME(Hash)
   SET_SELF_SIZE(Hash)
 
-  bool HashInit(const EVP_MD* md, v8::Maybe<unsigned int> xof_md_len);
+  bool HashInit(const EVP_MD* digest, v8::Maybe<unsigned int> xof_md_len);
+  bool HashInit(const EVP_MD* digest,
+                const CShakeOptions& options,
+                v8::Maybe<unsigned int> xof_md_len);
   bool HashUpdate(const char* data, size_t len);
 
   static void GetHashes(const v8::FunctionCallbackInfo<v8::Value>& args);
+  static void GetCachedAliases(const v8::FunctionCallbackInfo<v8::Value>& args);
+  static void OneShotDigest(const v8::FunctionCallbackInfo<v8::Value>& args);
 
  protected:
   static void New(const v8::FunctionCallbackInfo<v8::Value>& args);
@@ -34,15 +39,15 @@ class Hash final : public BaseObject {
   Hash(Environment* env, v8::Local<v8::Object> wrap);
 
  private:
-  EVPMDPointer mdctx_ {};
+  ncrypto::EVPMDCtxPointer mdctx_{};
   unsigned int md_len_ = 0;
   ByteSource digest_;
 };
 
 struct HashConfig final : public MemoryRetainer {
-  CryptoJobMode mode;
   ByteSource in;
-  const EVP_MD* digest;
+  ncrypto::Digest digest;
+  std::optional<CShakeOptions> options;
   unsigned int length;
 
   HashConfig() = default;
@@ -62,22 +67,21 @@ struct HashTraits final {
   static constexpr AsyncWrap::ProviderType Provider =
       AsyncWrap::PROVIDER_HASHREQUEST;
 
-  static v8::Maybe<bool> AdditionalConfig(
+  static v8::Maybe<void> AdditionalConfig(
       CryptoJobMode mode,
       const v8::FunctionCallbackInfo<v8::Value>& args,
       unsigned int offset,
       HashConfig* params);
 
-  static bool DeriveBits(
-      Environment* env,
-      const HashConfig& params,
-      ByteSource* out);
+  static bool DeriveBits(Environment* env,
+                         const HashConfig& params,
+                         ByteSource* out,
+                         CryptoJobMode mode,
+                         CryptoErrorStore* errors);
 
-  static v8::Maybe<bool> EncodeOutput(
-      Environment* env,
-      const HashConfig& params,
-      ByteSource* out,
-      v8::Local<v8::Value>* result);
+  static v8::MaybeLocal<v8::Value> EncodeOutput(Environment* env,
+                                                const HashConfig& params,
+                                                ByteSource* out);
 };
 
 using HashJob = DeriveBitsJob<HashTraits>;

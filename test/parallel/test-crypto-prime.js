@@ -5,6 +5,7 @@ if (!common.hasCrypto)
   common.skip('missing crypto');
 
 const assert = require('assert');
+const { isBoringSSL } = require('../common/crypto');
 
 const {
   generatePrime,
@@ -12,6 +13,8 @@ const {
   checkPrime,
   checkPrimeSync,
 } = require('crypto');
+
+const { Worker } = require('worker_threads');
 
 const { promisify } = require('util');
 const pgeneratePrime = promisify(generatePrime);
@@ -163,7 +166,7 @@ generatePrime(
   // The behavior when specifying only add without rem should depend on the
   // safe option.
 
-  if (process.versions.openssl >= '1.1.1f') {
+  if (!isBoringSSL) {
     generatePrime(128, {
       bigint: true,
       add: 5n
@@ -213,7 +216,7 @@ generatePrime(
     code: 'ERR_OUT_OF_RANGE'
   });
 
-  if (process.versions.openssl >= '1.1.1f') {
+  if (!isBoringSSL) {
     // This is possible and allowed (but makes little sense).
     assert.strictEqual(generatePrimeSync(4, {
       add: 15n,
@@ -229,14 +232,40 @@ generatePrime(
   });
 });
 
-['hello', {}, []].forEach((i) => {
-  assert.throws(() => checkPrime(2, { checks: i }), {
-    code: 'ERR_INVALID_ARG_TYPE'
-  }, common.mustNotCall());
-  assert.throws(() => checkPrimeSync(2, { checks: i }), {
-    code: 'ERR_INVALID_ARG_TYPE'
+for (const checks of ['hello', {}, []]) {
+  assert.throws(() => checkPrime(2n, { checks }, common.mustNotCall()), {
+    code: 'ERR_INVALID_ARG_TYPE',
+    message: /checks/
   });
-});
+  assert.throws(() => checkPrimeSync(2n, { checks }), {
+    code: 'ERR_INVALID_ARG_TYPE',
+    message: /checks/
+  });
+}
+
+for (const checks of [-(2 ** 31), -1, 2 ** 31, 2 ** 32 - 1, 2 ** 32, 2 ** 50]) {
+  assert.throws(() => checkPrime(2n, { checks }, common.mustNotCall()), {
+    code: 'ERR_OUT_OF_RANGE',
+    message: /<= 2147483647/
+  });
+  assert.throws(() => checkPrimeSync(2n, { checks }), {
+    code: 'ERR_OUT_OF_RANGE',
+    message: /<= 2147483647/
+  });
+}
+
+{
+  const bytes = Buffer.alloc(67108864);
+  bytes[0] = 0x1;
+  assert.throws(() => checkPrime(bytes, common.mustNotCall()), {
+    code: 'ERR_OSSL_BN_BIGNUM_TOO_LONG',
+    message: /bignum[_ ]too[_ ]long/i
+  });
+  assert.throws(() => checkPrimeSync(bytes), {
+    code: 'ERR_OSSL_BN_BIGNUM_TOO_LONG',
+    message: /bignum[_ ]too[_ ]long/i
+  });
+}
 
 assert(!checkPrimeSync(Buffer.from([0x1])));
 assert(checkPrimeSync(Buffer.from([0x2])));
@@ -280,4 +309,18 @@ assert.throws(() => {
     assert(checkPrimeSync(prime));
     checkPrime(prime, common.mustSucceed(assert));
   }));
+}
+
+{
+  // Verify that generatePrime can be reasonably interrupted.
+  const worker = new Worker(`
+    const { generatePrime } = require('crypto');
+    generatePrime(2048, () => {
+      throw new Error('should not be called');
+    });
+    process.exit(42);
+  `, { eval: true });
+
+  worker.on('error', common.mustNotCall());
+  worker.on('exit', common.mustCall((exitCode) => assert.strictEqual(exitCode, 42)));
 }

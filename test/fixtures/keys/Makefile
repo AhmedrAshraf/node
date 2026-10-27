@@ -1,12 +1,20 @@
 all: \
+  name-constraints-ca-cert.pem \
+  name-constraints-permitted-cert.pem \
+  name-constraints-excluded-cert.pem \
+  name-constraints-dns-san-cert.pem \
+  name-constraints-email-san-cert.pem \
   ca1-cert.pem \
   ca2-cert.pem \
   ca2-crl.pem \
+  ca2-crl-agent3.pem \
   ca3-cert.pem \
   ca4-cert.pem \
   ca5-cert.pem \
   ca6-cert.pem \
+  cert-without-key-fips.pfx \
   agent1-cert.pem \
+  agent1-fips.pfx \
   agent1.pfx \
   agent2-cert.pem \
   agent3-cert.pem \
@@ -24,7 +32,10 @@ all: \
   dh512.pem \
   dh1024.pem \
   dh2048.pem \
+  dh3072.pem \
   dherror.pem \
+  dh_private.pem \
+  dh_public.pem \
   dsa_params.pem \
   dsa_private.pem \
   dsa_private_encrypted.pem \
@@ -35,8 +46,17 @@ all: \
   dsa_private_encrypted_1025.pem \
   dsa_public_1025.pem \
   ec-cert.pem \
+  ec-fips.pfx \
   ec.pfx \
   fake-cnnic-root-cert.pem \
+  intermediate-ca-cert.pem \
+  intermediate-ca-key.pem \
+  leaf-from-intermediate-cert.pem \
+  leaf-from-intermediate-key.pem \
+  non-trusted-intermediate-ca-cert.pem \
+  non-trusted-intermediate-ca-key.pem \
+  non-trusted-leaf-from-intermediate-cert.pem \
+  non-trusted-leaf-from-intermediate-key.pem \
   rsa_private.pem \
   rsa_private_encrypted.pem \
   rsa_private_pkcs8.pem \
@@ -56,9 +76,12 @@ all: \
   rsa_spkac.spkac \
   rsa_spkac_invalid.spkac \
   rsa_private_2048.pem \
+  rsa_private_2048_3_primes.pem \
   rsa_private_4096.pem \
   rsa_public_2048.pem \
   rsa_public_4096.pem \
+  rsa_pss_cert_2048.pem \
+  rsa_pss_cert_2048_sha256_sha256_16.pem \
   rsa_pss_private_2048.pem \
   rsa_pss_private_2048_sha256_sha256_16.pem \
   rsa_pss_private_2048_sha512_sha256_20.pem \
@@ -87,6 +110,78 @@ all: \
   incorrect_san_correct_subject-key.pem \
   irrelevant_san_correct_subject-cert.pem \
   irrelevant_san_correct_subject-key.pem \
+  non-canonical-ip-dns-cert.pem \
+  non-canonical-ip-dns-key.pem \
+  ml_dsa_44_private.pem \
+  ml_dsa_44_private_seed_only.pem \
+  ml_dsa_44_private_priv_only.pem \
+  ml_dsa_44_private_encrypted.pem \
+  ml_dsa_44_private_encrypted.der \
+  ml_dsa_44_public.pem \
+  ml_dsa_65_private.pem \
+  ml_dsa_65_private_seed_only.pem \
+  ml_dsa_65_private_priv_only.pem \
+  ml_dsa_65_public.pem \
+  ml_dsa_87_private.pem \
+  ml_dsa_87_private_seed_only.pem \
+  ml_dsa_87_private_priv_only.pem \
+  ml_dsa_87_public.pem \
+  ml-dsa-44.json \
+  ml-dsa-65.json \
+  ml-dsa-87.json \
+  ml-kem-512.json \
+  ml-kem-768.json \
+  ml-kem-1024.json \
+  ml_kem_512_private.pem \
+  ml_kem_512_private_seed_only.pem \
+  ml_kem_512_private_priv_only.pem \
+  ml_kem_512_public.pem \
+  ml_kem_768_private.pem \
+  ml_kem_768_private_seed_only.pem \
+  ml_kem_768_private_priv_only.pem \
+  ml_kem_768_private_encrypted.pem \
+  ml_kem_768_private_encrypted.der \
+  ml_kem_768_public.pem \
+  ml_kem_1024_private.pem \
+  ml_kem_1024_private_seed_only.pem \
+  ml_kem_1024_private_priv_only.pem \
+  ml_kem_1024_public.pem \
+  slh_dsa_sha2_128s_private.pem \
+  slh_dsa_sha2_128s_public.pem \
+  slh_dsa_sha2_128f_private.pem \
+  slh_dsa_sha2_128f_public.pem \
+  slh_dsa_sha2_192s_private.pem \
+  slh_dsa_sha2_192s_public.pem \
+  slh_dsa_sha2_192f_private.pem \
+  slh_dsa_sha2_192f_public.pem \
+  slh_dsa_sha2_256s_private.pem \
+  slh_dsa_sha2_256s_public.pem \
+  slh_dsa_sha2_256f_private.pem \
+  slh_dsa_sha2_256f_public.pem \
+  slh_dsa_shake_128s_private.pem \
+  slh_dsa_shake_128s_public.pem \
+  slh_dsa_shake_128f_private.pem \
+  slh_dsa_shake_128f_public.pem \
+  slh_dsa_shake_192s_private.pem \
+  slh_dsa_shake_192s_public.pem \
+  slh_dsa_shake_192f_private.pem \
+  slh_dsa_shake_192f_public.pem \
+  slh_dsa_shake_256s_private.pem \
+  slh_dsa_shake_256s_public.pem \
+  slh_dsa_shake_256f_private.pem \
+  slh_dsa_shake_256f_public.pem \
+  slh-dsa-sha2-128s.json \
+  slh-dsa-sha2-128f.json \
+  slh-dsa-sha2-192s.json \
+  slh-dsa-sha2-192f.json \
+  slh-dsa-sha2-256s.json \
+  slh-dsa-sha2-256f.json \
+  slh-dsa-shake-128s.json \
+  slh-dsa-shake-128f.json \
+  slh-dsa-shake-192s.json \
+  slh-dsa-shake-192f.json \
+  slh-dsa-shake-256s.json \
+  slh-dsa-shake-256f.json \
 
 #
 # Create Certificate Authority: ca1
@@ -233,6 +328,102 @@ fake-startcom-root-cert.pem: fake-startcom-root.cnf \
 	echo '01' > fake-startcom-root-serial
 	touch fake-startcom-root-database.txt
 
+
+intermediate-ca-key.pem:
+	openssl genrsa -out intermediate.key 2048
+
+intermediate-ca-cert.pem: intermediate-ca-key.pem
+	openssl req -new \
+			-sha256 \
+			-nodes \
+			-key intermediate.key  \
+			-subj "/C=US/ST=CA/L=SF/O=NODEJS/CN=NodeJS-Test-Intermediate-CA" \
+			-out test-intermediate-ca.csr
+
+	openssl x509 -req \
+			-extensions v3_ca \
+			-extfile fake-startcom-root.cnf \
+			-in test-intermediate-ca.csr \
+			-CA fake-startcom-root-cert.pem \
+			-CAkey fake-startcom-root-key.pem \
+			-CAcreateserial \
+			-out intermediate-ca.pem \
+			-days 99999 \
+			-sha256
+	rm -f test-intermediate-ca.csr
+
+leaf-from-intermediate-key.pem:
+	openssl genrsa -out leaf-from-intermediate-key.pem 2048
+
+leaf-from-intermediate-cert.pem: leaf-from-intermediate-key.pem
+	openssl genrsa -out leaf-from-intermediate-key.pem 2048
+	openssl req -new \
+			-sha256 \
+			-nodes \
+			-key leaf-from-intermediate-key.pem \
+			-addext "subjectAltName = DNS:localhost" \
+			-subj "/C=US/ST=CA/L=SF/O=NODEJS/CN=localhost" \
+			-out leaf-from-intermediate-cert.csr
+	openssl x509 -req \
+			-in leaf-from-intermediate-cert.csr \
+			-CA intermediate-ca.pem \
+			-CAkey intermediate.key \
+			-CAcreateserial \
+			-out leaf-from-intermediate-cert.pem \
+			-days 99999 \
+			-copy_extensions copy \
+			-sha256
+
+	rm -f leaf-from-intermediate-cert.csr
+
+non-trusted-intermediate-ca-key.pem:
+	openssl genrsa -out non-trusted-intermediate.key 2048
+
+non-trusted-intermediate-ca-cert.pem: non-trusted-intermediate-ca-key.pem
+	openssl req -new \
+			-sha256 \
+			-nodes \
+			-key non-trusted-intermediate.key  \
+			-subj "/C=US/ST=CA/L=SF/O=NODEJS/CN=NodeJS-Non-Trusted-Test-Intermediate-CA" \
+			-out non-trusted-test-intermediate-ca.csr
+
+	openssl x509 -req \
+			-extensions v3_ca \
+			-extfile fake-startcom-root.cnf \
+			-in non-trusted-test-intermediate-ca.csr \
+			-passin "pass:password" \
+			-CA ca1-cert.pem \
+			-CAkey ca1-key.pem \
+			-CAcreateserial \
+			-out non-trusted-intermediate-ca.pem \
+			-days 99999 \
+			-sha256
+	rm -f non-trusted-test-intermediate-ca.csr
+
+non-trusted-leaf-from-intermediate-key.pem:
+	openssl genrsa -out non-trusted-leaf-from-intermediate-key.pem 2048
+
+non-trusted-leaf-from-intermediate-cert.pem: non-trusted-leaf-from-intermediate-key.pem
+	openssl genrsa -out non-trusted-leaf-from-intermediate-key.pem 2048
+	openssl req -new \
+			-sha256 \
+			-nodes \
+			-key non-trusted-leaf-from-intermediate-key.pem \
+			-addext "subjectAltName = DNS:localhost" \
+			-subj "/C=US/ST=CA/L=SF/O=NODEJS/CN=localhost" \
+			-out non-trusted-leaf-from-intermediate-cert.csr
+	openssl x509 -req \
+			-in non-trusted-leaf-from-intermediate-cert.csr \
+			-CA non-trusted-intermediate-ca.pem \
+			-CAkey non-trusted-intermediate.key \
+			-CAcreateserial \
+			-out non-trusted-leaf-from-intermediate-cert.pem \
+			-days 99999 \
+			-copy_extensions copy \
+			-sha256
+
+	rm -f non-trusted-leaf-from-intermediate-cert.csr
+
 #
 # agent1 is signed by ca1.
 #
@@ -263,6 +454,20 @@ agent1.pfx: agent1-cert.pem agent1-key.pem ca1-cert.pem
 		-certfile ca1-cert.pem \
 		-out agent1.pfx \
 		-password pass:sample
+
+# PKCS12KDF is unavailable under FIPS properties. Use PBMAC1 with PBKDF2
+# instead, alongside AES-256/PBKDF2 key protection.
+agent1-fips.pfx: agent1-cert.pem agent1-key.pem ca1-cert.pem
+	openssl pkcs12 -export \
+		-keypbe AES-256-CBC \
+		-certpbe AES-256-CBC \
+		-iter 2048 \
+		-pbmac1_pbkdf2 \
+		-in agent1-cert.pem \
+		-inkey agent1-key.pem \
+		-certfile ca1-cert.pem \
+		-out agent1-fips.pfx \
+		-password pass:password
 
 agent1-verify: agent1-cert.pem ca1-cert.pem
 	openssl verify -CAfile ca1-cert.pem agent1-cert.pem
@@ -355,6 +560,28 @@ ca2-crl.pem: ca2-key.pem ca2-cert.pem ca2.cnf agent4-cert.pem
 		-gencrl \
 		-out ca2-crl.pem \
 		-passin 'pass:password'
+
+#
+# Make CRL with agent3 being rejected
+# Uses a separate temporary database so the ca2-crl.pem revocation of agent4
+# does not contaminate this CRL.
+#
+ca2-crl-agent3.pem: ca2-key.pem ca2-cert.pem ca2.cnf agent3-cert.pem
+	@> ca2-crl-agent3-database.txt
+	@sed 's/ca2-database/ca2-crl-agent3-database/' ca2.cnf > ca2-crl-agent3.cnf
+	openssl ca -revoke agent3-cert.pem \
+		-keyfile ca2-key.pem \
+		-cert ca2-cert.pem \
+		-config ca2-crl-agent3.cnf \
+		-passin 'pass:password'
+	openssl ca \
+		-keyfile ca2-key.pem \
+		-cert ca2-cert.pem \
+		-config ca2-crl-agent3.cnf \
+		-gencrl \
+		-out ca2-crl-agent3.pem \
+		-passin 'pass:password'
+	@rm -f ca2-crl-agent3.cnf ca2-crl-agent3-database.txt*
 
 #
 # agent5 is signed by ca2 (client cert)
@@ -585,6 +812,30 @@ ec.pfx: ec-cert.pem ec-key.pem
 		-out ec.pfx \
 		-password pass:
 
+# See agent1-fips.pfx for why the FIPS fixture uses PBMAC1.
+ec-fips.pfx: ec-cert.pem ec-key.pem
+	openssl pkcs12 -export \
+		-keypbe AES-256-CBC \
+		-certpbe AES-256-CBC \
+		-iter 2048 \
+		-pbmac1_pbkdf2 \
+		-in ec-cert.pem \
+		-inkey ec-key.pem \
+		-out ec-fips.pfx \
+		-password pass:password
+
+# A bundle of certificates with no private key. See agent1-fips.pfx for why the
+# FIPS fixture uses PBMAC1.
+cert-without-key-fips.pfx: ca1-cert.pem
+	openssl pkcs12 -export \
+		-nokeys \
+		-certpbe AES-256-CBC \
+		-iter 2048 \
+		-pbmac1_pbkdf2 \
+		-in ca1-cert.pem \
+		-out cert-without-key-fips.pfx \
+		-password pass:password
+
 dh512.pem:
 	openssl dhparam -out dh512.pem 512
 
@@ -594,8 +845,17 @@ dh1024.pem:
 dh2048.pem:
 	openssl dhparam -out dh2048.pem 2048
 
+dh3072.pem:
+	openssl dhparam -out dh3072.pem 3072
+
 dherror.pem: dh1024.pem
 	sed 's/^[^-].*/AAAAAAAAAA/g' dh1024.pem > dherror.pem
+
+dh_private.pem:
+	openssl genpkey -algorithm dh -out dh_private.pem -pkeyopt dh_param:ffdhe2048
+
+dh_public.pem: dh_private.pem
+	openssl pkey -in dh_private.pem -pubout -out dh_public.pem
 
 dsa_params.pem:
 	openssl dsaparam -out dsa_params.pem 2048
@@ -604,7 +864,8 @@ dsa_private.pem: dsa_params.pem
 	openssl gendsa -out dsa_private.pem dsa_params.pem
 
 dsa_private_encrypted.pem: dsa_private.pem
-	openssl dsa -aes256 -in dsa_private.pem -passout 'pass:password' -out dsa_private_encrypted.pem
+	openssl pkcs8 -topk8 -v2 aes-256-cbc -v2prf hmacWithSHA256 -iter 2048 -saltlen 16 \
+	  -in $< -passout 'pass:password' -out $@
 
 dsa_private_pkcs8.pem: dsa_private.pem
 	openssl pkcs8 -topk8 -inform PEM -outform PEM -in dsa_private.pem -out dsa_private_pkcs8.pem -nocrypt
@@ -628,7 +889,8 @@ rsa_private.pem:
 	openssl genrsa -out rsa_private.pem 2048
 
 rsa_private_encrypted.pem: rsa_private.pem
-	openssl rsa -aes256 -in rsa_private.pem -passout 'pass:password' -out rsa_private_encrypted.pem
+	openssl pkcs8 -topk8 -v2 aes-256-cbc -v2prf hmacWithSHA256 -iter 2048 -saltlen 16 \
+	  -in $< -passout 'pass:password' -out $@
 
 rsa_private_pkcs8.pem: rsa_private.pem
 	openssl pkcs8 -topk8 -inform PEM -outform PEM -in rsa_private.pem -out rsa_private_pkcs8.pem -nocrypt
@@ -688,6 +950,13 @@ rsa_spkac_invalid.spkac: rsa_spkac.spkac
 rsa_private_2048.pem:
 	openssl genrsa -out rsa_private_2048.pem 2048
 
+rsa_private_2048_3_primes.pem:
+	openssl genpkey \
+		-algorithm RSA \
+		-pkeyopt rsa_keygen_bits:2048 \
+		-pkeyopt rsa_keygen_primes:3 \
+		-out rsa_private_2048_3_primes.pem
+
 rsa_private_4096.pem:
 	openssl genrsa -out rsa_private_4096.pem 4096
 
@@ -708,6 +977,12 @@ rsa_pss_private_2048_sha512_sha256_20.pem:
 
 rsa_pss_private_2048_sha1_sha1_20.pem:
 	openssl genpkey -algorithm RSA-PSS -pkeyopt rsa_keygen_bits:2048 -pkeyopt rsa_keygen_pubexp:65537 -pkeyopt rsa_pss_keygen_md:sha1 -pkeyopt rsa_pss_keygen_mgf1_md:sha1 -pkeyopt rsa_pss_keygen_saltlen:20 -out rsa_pss_private_2048_sha1_sha1_20.pem
+
+rsa_pss_cert_2048.pem: rsa_pss_private_2048.pem
+	openssl req -new -x509 -key rsa_pss_private_2048.pem -subj "/CN=Node.js" -days 36500 -set_serial 1 -out rsa_pss_cert_2048.pem
+
+rsa_pss_cert_2048_sha256_sha256_16.pem: rsa_pss_private_2048_sha256_sha256_16.pem
+	openssl req -new -x509 -key rsa_pss_private_2048_sha256_sha256_16.pem -subj "/CN=Node.js" -days 36500 -set_serial 1 -out rsa_pss_cert_2048_sha256_sha256_16.pem
 
 rsa_pss_public_2048.pem: rsa_pss_private_2048.pem
 	openssl pkey -in rsa_pss_private_2048.pem -pubout -out rsa_pss_public_2048.pem
@@ -738,6 +1013,195 @@ ed448_private.pem:
 
 ed448_public.pem: ed448_private.pem
 	openssl pkey -in ed448_private.pem -pubout -out ed448_public.pem
+
+slh_dsa_sha2_128s_private.pem:
+	openssl genpkey -algorithm slh-dsa-sha2-128s -out slh_dsa_sha2_128s_private.pem
+
+slh_dsa_sha2_128s_public.pem: slh_dsa_sha2_128s_private.pem
+	openssl pkey -in slh_dsa_sha2_128s_private.pem -pubout -out slh_dsa_sha2_128s_public.pem
+
+slh_dsa_sha2_128f_private.pem:
+	openssl genpkey -algorithm slh-dsa-sha2-128f -out slh_dsa_sha2_128f_private.pem
+
+slh_dsa_sha2_128f_public.pem: slh_dsa_sha2_128f_private.pem
+	openssl pkey -in slh_dsa_sha2_128f_private.pem -pubout -out slh_dsa_sha2_128f_public.pem
+
+slh_dsa_sha2_192s_private.pem:
+	openssl genpkey -algorithm slh-dsa-sha2-192s -out slh_dsa_sha2_192s_private.pem
+
+slh_dsa_sha2_192s_public.pem: slh_dsa_sha2_192s_private.pem
+	openssl pkey -in slh_dsa_sha2_192s_private.pem -pubout -out slh_dsa_sha2_192s_public.pem
+
+slh_dsa_sha2_192f_private.pem:
+	openssl genpkey -algorithm slh-dsa-sha2-192f -out slh_dsa_sha2_192f_private.pem
+
+slh_dsa_sha2_192f_public.pem: slh_dsa_sha2_192f_private.pem
+	openssl pkey -in slh_dsa_sha2_192f_private.pem -pubout -out slh_dsa_sha2_192f_public.pem
+
+slh_dsa_sha2_256s_private.pem:
+	openssl genpkey -algorithm slh-dsa-sha2-256s -out slh_dsa_sha2_256s_private.pem
+
+slh_dsa_sha2_256s_public.pem: slh_dsa_sha2_256s_private.pem
+	openssl pkey -in slh_dsa_sha2_256s_private.pem -pubout -out slh_dsa_sha2_256s_public.pem
+
+slh_dsa_sha2_256f_private.pem:
+	openssl genpkey -algorithm slh-dsa-sha2-256f -out slh_dsa_sha2_256f_private.pem
+
+slh_dsa_sha2_256f_public.pem: slh_dsa_sha2_256f_private.pem
+	openssl pkey -in slh_dsa_sha2_256f_private.pem -pubout -out slh_dsa_sha2_256f_public.pem
+
+slh_dsa_shake_128s_private.pem:
+	openssl genpkey -algorithm slh-dsa-shake-128s -out slh_dsa_shake_128s_private.pem
+
+slh_dsa_shake_128s_public.pem: slh_dsa_shake_128s_private.pem
+	openssl pkey -in slh_dsa_shake_128s_private.pem -pubout -out slh_dsa_shake_128s_public.pem
+
+slh_dsa_shake_128f_private.pem:
+	openssl genpkey -algorithm slh-dsa-shake-128f -out slh_dsa_shake_128f_private.pem
+
+slh_dsa_shake_128f_public.pem: slh_dsa_shake_128f_private.pem
+	openssl pkey -in slh_dsa_shake_128f_private.pem -pubout -out slh_dsa_shake_128f_public.pem
+
+slh_dsa_shake_192s_private.pem:
+	openssl genpkey -algorithm slh-dsa-shake-192s -out slh_dsa_shake_192s_private.pem
+
+slh_dsa_shake_192s_public.pem: slh_dsa_shake_192s_private.pem
+	openssl pkey -in slh_dsa_shake_192s_private.pem -pubout -out slh_dsa_shake_192s_public.pem
+
+slh_dsa_shake_192f_private.pem:
+	openssl genpkey -algorithm slh-dsa-shake-192f -out slh_dsa_shake_192f_private.pem
+
+slh_dsa_shake_192f_public.pem: slh_dsa_shake_192f_private.pem
+	openssl pkey -in slh_dsa_shake_192f_private.pem -pubout -out slh_dsa_shake_192f_public.pem
+
+slh_dsa_shake_256s_private.pem:
+	openssl genpkey -algorithm slh-dsa-shake-256s -out slh_dsa_shake_256s_private.pem
+
+slh_dsa_shake_256s_public.pem: slh_dsa_shake_256s_private.pem
+	openssl pkey -in slh_dsa_shake_256s_private.pem -pubout -out slh_dsa_shake_256s_public.pem
+
+slh_dsa_shake_256f_private.pem:
+	openssl genpkey -algorithm slh-dsa-shake-256f -out slh_dsa_shake_256f_private.pem
+
+slh_dsa_shake_256f_public.pem: slh_dsa_shake_256f_private.pem
+	openssl pkey -in slh_dsa_shake_256f_private.pem -pubout -out slh_dsa_shake_256f_public.pem
+
+ml_dsa_44_private.pem:
+	openssl genpkey -algorithm ml-dsa-44 -out ml_dsa_44_private.pem
+
+ml_dsa_44_private_seed_only.pem: ml_dsa_44_private.pem
+	openssl pkey -in ml_dsa_44_private.pem -provparam ml-dsa.output_formats=seed-only -out ml_dsa_44_private_seed_only.pem
+
+ml_dsa_44_private_priv_only.pem: ml_dsa_44_private.pem
+	openssl pkey -in ml_dsa_44_private.pem -provparam ml-dsa.output_formats=priv-only -out ml_dsa_44_private_priv_only.pem
+
+ml_dsa_44_public.pem: ml_dsa_44_private.pem
+	openssl pkey -in ml_dsa_44_private.pem -pubout -out ml_dsa_44_public.pem
+
+ml_dsa_44_private_encrypted.pem: ml_dsa_44_private_seed_only.pem
+	openssl pkcs8 -topk8 -v2 aes-256-cbc -provparam ml-dsa.output_formats=seed-only -in ml_dsa_44_private_seed_only.pem -passout 'pass:password' -out ml_dsa_44_private_encrypted.pem
+
+ml_dsa_44_private_encrypted.der: ml_dsa_44_private_seed_only.pem
+	openssl pkcs8 -topk8 -v2 aes-256-cbc -provparam ml-dsa.output_formats=seed-only -in ml_dsa_44_private_seed_only.pem -passout 'pass:password' -outform DER -out ml_dsa_44_private_encrypted.der
+
+ml_dsa_65_private.pem:
+	openssl genpkey -algorithm ml-dsa-65 -out ml_dsa_65_private.pem
+
+ml_dsa_65_private_seed_only.pem: ml_dsa_65_private.pem
+	openssl pkey -in ml_dsa_65_private.pem -provparam ml-dsa.output_formats=seed-only -out ml_dsa_65_private_seed_only.pem
+
+ml_dsa_65_private_priv_only.pem: ml_dsa_65_private.pem
+	openssl pkey -in ml_dsa_65_private.pem -provparam ml-dsa.output_formats=priv-only -out ml_dsa_65_private_priv_only.pem
+
+ml_dsa_65_public.pem: ml_dsa_65_private.pem
+	openssl pkey -in ml_dsa_65_private.pem -pubout -out ml_dsa_65_public.pem
+
+ml_dsa_87_private.pem:
+	openssl genpkey -algorithm ml-dsa-87 -out ml_dsa_87_private.pem
+
+ml_dsa_87_private_seed_only.pem: ml_dsa_87_private.pem
+	openssl pkey -in ml_dsa_87_private.pem -provparam ml-dsa.output_formats=seed-only -out ml_dsa_87_private_seed_only.pem
+
+ml_dsa_87_private_priv_only.pem: ml_dsa_87_private.pem
+	openssl pkey -in ml_dsa_87_private.pem -provparam ml-dsa.output_formats=priv-only -out ml_dsa_87_private_priv_only.pem
+
+ml_dsa_87_public.pem: ml_dsa_87_private.pem
+	openssl pkey -in ml_dsa_87_private.pem -pubout -out ml_dsa_87_public.pem
+
+ml_kem_512_private.pem:
+	openssl genpkey -algorithm ml-kem-512 -out ml_kem_512_private.pem
+
+ml_kem_512_private_seed_only.pem: ml_kem_512_private.pem
+	openssl pkey -in ml_kem_512_private.pem -provparam ml-kem.output_formats=seed-only -out ml_kem_512_private_seed_only.pem
+
+ml_kem_512_private_priv_only.pem: ml_kem_512_private.pem
+	openssl pkey -in ml_kem_512_private.pem -provparam ml-kem.output_formats=priv-only -out ml_kem_512_private_priv_only.pem
+
+ml_kem_512_public.pem: ml_kem_512_private.pem
+	openssl pkey -in ml_kem_512_private.pem -pubout -out ml_kem_512_public.pem
+
+ml_kem_768_private.pem:
+	openssl genpkey -algorithm ml-kem-768 -out ml_kem_768_private.pem
+
+ml_kem_768_private_seed_only.pem: ml_kem_768_private.pem
+	openssl pkey -in ml_kem_768_private.pem -provparam ml-kem.output_formats=seed-only -out ml_kem_768_private_seed_only.pem
+
+ml_kem_768_private_priv_only.pem: ml_kem_768_private.pem
+	openssl pkey -in ml_kem_768_private.pem -provparam ml-kem.output_formats=priv-only -out ml_kem_768_private_priv_only.pem
+
+ml_kem_768_public.pem: ml_kem_768_private.pem
+	openssl pkey -in ml_kem_768_private.pem -pubout -out ml_kem_768_public.pem
+
+ml_kem_768_private_encrypted.pem: ml_kem_768_private_seed_only.pem
+	openssl pkcs8 -topk8 -v2 aes-256-cbc -provparam ml-kem.output_formats=seed-only -in ml_kem_768_private_seed_only.pem -passout 'pass:password' -out ml_kem_768_private_encrypted.pem
+
+ml_kem_768_private_encrypted.der: ml_kem_768_private_seed_only.pem
+	openssl pkcs8 -topk8 -v2 aes-256-cbc -provparam ml-kem.output_formats=seed-only -in ml_kem_768_private_seed_only.pem -passout 'pass:password' -outform DER -out ml_kem_768_private_encrypted.der
+
+ml_kem_1024_private.pem:
+	openssl genpkey -algorithm ml-kem-1024 -out ml_kem_1024_private.pem
+
+ml_kem_1024_private_seed_only.pem: ml_kem_1024_private.pem
+	openssl pkey -in ml_kem_1024_private.pem -provparam ml-kem.output_formats=seed-only -out ml_kem_1024_private_seed_only.pem
+
+ml_kem_1024_private_priv_only.pem: ml_kem_1024_private.pem
+	openssl pkey -in ml_kem_1024_private.pem -provparam ml-kem.output_formats=priv-only -out ml_kem_1024_private_priv_only.pem
+
+ml_kem_1024_public.pem: ml_kem_1024_private.pem
+	openssl pkey -in ml_kem_1024_private.pem -pubout -out ml_kem_1024_public.pem
+
+define GEN_PQC_JWK
+$(1): $(subst -,_,$(basename $(1)))_private.pem
+	../../../node -e '\
+		const { readFileSync, writeFileSync } = require("fs"); \
+		const { createPrivateKey } = require("crypto"); \
+		const pem = "$(subst -,_,$(basename $(1)))_private.pem"; \
+		const key = createPrivateKey(readFileSync(pem)); \
+		const jwk = JSON.stringify(key.export({ format: "jwk" }), null, 2); \
+		writeFileSync("$(1)", jwk + "\n")'
+endef
+
+PQC_JWK_FIXTURES = \
+  ml-dsa-44.json \
+  ml-dsa-65.json \
+  ml-dsa-87.json \
+  ml-kem-512.json \
+  ml-kem-768.json \
+  ml-kem-1024.json \
+  slh-dsa-sha2-128s.json \
+  slh-dsa-sha2-128f.json \
+  slh-dsa-sha2-192s.json \
+  slh-dsa-sha2-192f.json \
+  slh-dsa-sha2-256s.json \
+  slh-dsa-sha2-256f.json \
+  slh-dsa-shake-128s.json \
+  slh-dsa-shake-128f.json \
+  slh-dsa-shake-192s.json \
+  slh-dsa-shake-192f.json \
+  slh-dsa-shake-256s.json \
+  slh-dsa-shake-256f.json \
+
+$(foreach v,$(PQC_JWK_FIXTURES),$(eval $(call GEN_PQC_JWK,$(v))))
 
 x448_private.pem:
 	openssl genpkey -algorithm x448 -out x448_private.pem
@@ -801,8 +1265,54 @@ irrelevant_san_correct_subject-cert.pem: irrelevant_san_correct_subject-key.pem
 irrelevant_san_correct_subject-key.pem:
 	openssl ecparam -name prime256v1 -genkey -noout -out irrelevant_san_correct_subject-key.pem
 
+# Certificates for DNS name constraints with CN fallback.
+# Reuse the existing ca1 and agent1 private keys.
+name-constraints-ca-cert.pem: name-constraints.cnf ca1-key.pem
+	openssl req -new -x509 -sha256 -days 99999 -set_serial 1 \
+		-config name-constraints.cnf -key ca1-key.pem \
+		-passin "pass:password" -out $@
+
+name-constraints-permitted-cert.pem: CN = www.example.com
+name-constraints-permitted-cert.pem: SERIAL = 2
+name-constraints-excluded-cert.pem: SERIAL = 3
+name-constraints-dns-san-cert.pem: SERIAL = 4
+name-constraints-email-san-cert.pem: SERIAL = 5
+name-constraints-%-cert.pem: CN = outside.invalid
+name-constraints-%-cert.pem: name-constraints.cnf name-constraints-ca-cert.pem ca1-key.pem agent1-key.pem
+	openssl req -new -config name-constraints.cnf -key agent1-key.pem \
+		-subj "/CN=$(CN)/emailAddress=subject@example.com" \
+		-out name-constraints-$*-csr.pem
+	openssl x509 -req -sha256 -days 99999 -set_serial $(SERIAL) \
+		-in name-constraints-$*-csr.pem \
+		-CA name-constraints-ca-cert.pem -CAkey ca1-key.pem \
+		-passin "pass:password" -extfile name-constraints.cnf \
+		-extensions $* -out $@
+	rm name-constraints-$*-csr.pem
+
+non-canonical-ip-dns-cert.pem: non-canonical-ip-dns-key.pem ca1-cert.pem ca1-key.pem
+	openssl req -new \
+	            -key non-canonical-ip-dns-key.pem \
+	            -out non-canonical-ip-dns-cert.csr \
+	            -sha256 \
+	            -subj "/CN=Example Operator" \
+	            -addext "subjectAltName = DNS:87.0.0.1"
+	openssl x509 -req \
+	             -in non-canonical-ip-dns-cert.csr \
+	             -CA ca1-cert.pem \
+	             -CAkey ca1-key.pem \
+	             -passin "pass:password" \
+	             -set_serial 0x1001 \
+	             -out non-canonical-ip-dns-cert.pem \
+	             -days 99999 \
+	             -copy_extensions copy \
+	             -sha256
+	rm non-canonical-ip-dns-cert.csr
+
+non-canonical-ip-dns-key.pem:
+	openssl ecparam -name prime256v1 -genkey -noout -out non-canonical-ip-dns-key.pem
+
 clean:
-	rm -f *.pfx *.pem *.srl ca2-database.txt ca2-serial fake-startcom-root-serial *.print *.old fake-startcom-root-issued-certs/*.pem
+	rm -f *.pfx *.pem *.srl ca2-database.txt ca2-crl-agent3-database.txt* ca2-crl-agent3.cnf ca2-serial fake-startcom-root-serial *.print *.old fake-startcom-root-issued-certs/*.pem
 	@> fake-startcom-root-database.txt
 
 test: agent1-verify agent2-verify agent3-verify agent4-verify agent5-verify agent6-verify agent7-verify agent8-verify agent10-verify ec10-verify

@@ -27,25 +27,16 @@
 #include "node.h"
 #include "v8.h"
 
+#define EXTENSIONLESS_FORMAT_JAVASCRIPT (0)
+#define EXTENSIONLESS_FORMAT_WASM (1)
+
 #if HAVE_OPENSSL
-
-#ifndef RSA_PSS_SALTLEN_DIGEST
-#define RSA_PSS_SALTLEN_DIGEST -1
-#endif
-
-#ifndef RSA_PSS_SALTLEN_MAX_SIGN
-#define RSA_PSS_SALTLEN_MAX_SIGN -2
-#endif
-
-#ifndef RSA_PSS_SALTLEN_AUTO
-#define RSA_PSS_SALTLEN_AUTO -2
-#endif
 
 #if defined(NODE_OPENSSL_DEFAULT_CIPHER_LIST)
 #define DEFAULT_CIPHER_LIST_CORE NODE_OPENSSL_DEFAULT_CIPHER_LIST
 #else
 // TLSv1.3 suites start with TLS_, and are the OpenSSL defaults, see:
-//   https://www.openssl.org/docs/man1.1.1/man3/SSL_CTX_set_ciphersuites.html
+//   https://www.openssl.org/docs/man3.0/man3/SSL_CTX_set_ciphersuites.html
 #define DEFAULT_CIPHER_LIST_CORE \
                                  "TLS_AES_256_GCM_SHA384:"          \
                                  "TLS_CHACHA20_POLY1305_SHA256:"    \
@@ -73,11 +64,6 @@
                                  "!CAMELLIA"
 #endif  // NODE_OPENSSL_DEFAULT_CIPHER_LIST
 #endif  // HAVE_OPENSSL
-
-namespace node {
-
-void DefineConstants(v8::Isolate* isolate, v8::Local<v8::Object> target);
-}  // namespace node
 
 #endif  // defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 

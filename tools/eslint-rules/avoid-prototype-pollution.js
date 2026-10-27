@@ -80,7 +80,7 @@ function createUnsafeStringMethodReport(context, name, lookedUpProperty) {
         node,
         message: `${name} looks up the ${lookedUpProperty} property on the first argument`,
       });
-    }
+    },
   };
 }
 
@@ -98,7 +98,7 @@ function createUnsafeStringMethodOnRegexReport(context, name, lookedUpProperty) 
         node,
         message: `${name} looks up the ${lookedUpProperty} property of the passed regex, use ${safePrimordialName} directly`,
       });
-    }
+    },
   };
 }
 
@@ -148,14 +148,14 @@ module.exports = {
           suggest: [{
             desc: 'Use RegexpPrototypeExec instead',
             fix(fixer) {
-              const testRange = { ...node.range };
-              testRange.start = testRange.start + 'RegexpPrototype'.length;
-              testRange.end = testRange.start + 'Test'.length;
+              const testRange = [ ...node.range ];
+              testRange[0] = testRange[0] + 'RegexpPrototype'.length;
+              testRange[1] = testRange[0] + 'Test'.length;
               return [
                 fixer.replaceTextRange(testRange, 'Exec'),
                 fixer.insertTextAfter(node, ' !== null'),
               ];
-            }
+            },
           }],
         });
       },
@@ -222,6 +222,36 @@ module.exports = {
         context.report({
           node,
           message: `Use Safe${node.callee.name} instead of ${node.callee.name}`,
+        });
+      },
+
+      [CallExpression('ArrayPrototypeConcat')](node) {
+        context.report({
+          node,
+          message: '%Array.prototype.concat% looks up `@@isConcatSpreadable` ' +
+                   'which can be subject to prototype pollution',
+        });
+      },
+
+      'AssignmentPattern[right.type="ObjectExpression"]'(node) {
+        if (!node.right.properties.length) {
+          context.report({
+            node: node.right,
+            message: 'Use kEmptyObject instead of declaring a new empty object, or define a __proto__ property',
+          });
+          return;
+        }
+        const propertyIsIdentifier = (p) => p.key.type === 'Identifier';
+        if (node.left.type === 'ObjectPattern' &&
+            node.left.properties.every(propertyIsIdentifier) &&
+            node.right.properties.every(propertyIsIdentifier)) {
+          const rightNames = node.right.properties.map((p) => p.key.name);
+          if (node.left.properties.every((p) => rightNames.includes(p.key.name))) return;
+        }
+        if (node.right.properties.some((p) => p.key.name === '__proto__')) return;
+        context.report({
+          node: node.right,
+          message: `Add '__proto__: null' to avoid inheriting from Object.prototype, or '__proto__: ObjectPrototype' if inheritance is desirable`,
         });
       },
     };

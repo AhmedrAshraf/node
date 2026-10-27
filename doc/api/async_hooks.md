@@ -144,18 +144,20 @@ function destroy(asyncId) { }
 function promiseResolve(asyncId) { }
 ```
 
-## `async_hooks.createHook(callbacks)`
+## `async_hooks.createHook(options)`
 
 <!-- YAML
 added: v8.1.0
 -->
 
-* `callbacks` {Object} The [Hook Callbacks][] to register
+* `options` {Object} The [Hook Callbacks][] to register
   * `init` {Function} The [`init` callback][].
   * `before` {Function} The [`before` callback][].
   * `after` {Function} The [`after` callback][].
   * `destroy` {Function} The [`destroy` callback][].
   * `promiseResolve` {Function} The [`promiseResolve` callback][].
+  * `trackPromises` {boolean} Whether the hook should track `Promise`s. Cannot be `false` if
+    `promiseResolve` is set. **Default**: `true`.
 * Returns: {AsyncHook} Instance used for disabling and enabling hooks
 
 Registers functions to be called for different lifetime events of each async
@@ -354,7 +356,8 @@ Furthermore users of [`AsyncResource`][] create async resources independent
 of Node.js itself.
 
 There is also the `PROMISE` resource type, which is used to track `Promise`
-instances and asynchronous work scheduled by them.
+instances and asynchronous work scheduled by them. The `Promise`s are only
+tracked when `trackPromises` option is set to `true`.
 
 Users are able to define their own `type` when using the public embedder API.
 
@@ -375,6 +378,7 @@ The following is a simple demonstration of `triggerAsyncId`:
 import { createHook, executionAsyncId } from 'node:async_hooks';
 import { stdout } from 'node:process';
 import net from 'node:net';
+import fs from 'node:fs';
 
 createHook({
   init(asyncId, type, triggerAsyncId) {
@@ -392,6 +396,7 @@ net.createServer((conn) => {}).listen(8080);
 const { createHook, executionAsyncId } = require('node:async_hooks');
 const { stdout } = require('node:process');
 const net = require('node:net');
+const fs = require('node:fs');
 
 createHook({
   init(asyncId, type, triggerAsyncId) {
@@ -443,7 +448,48 @@ The following is an example with additional information about the calls to
 callback to `listen()` will look like. The output formatting is slightly more
 elaborate to make calling context easier to see.
 
-```js
+```mjs
+import async_hooks from 'node:async_hooks';
+import fs from 'node:fs';
+import net from 'node:net';
+import { stdout } from 'node:process';
+const { fd } = stdout;
+
+let indent = 0;
+async_hooks.createHook({
+  init(asyncId, type, triggerAsyncId) {
+    const eid = async_hooks.executionAsyncId();
+    const indentStr = ' '.repeat(indent);
+    fs.writeSync(
+      fd,
+      `${indentStr}${type}(${asyncId}):` +
+      ` trigger: ${triggerAsyncId} execution: ${eid}\n`);
+  },
+  before(asyncId) {
+    const indentStr = ' '.repeat(indent);
+    fs.writeSync(fd, `${indentStr}before:  ${asyncId}\n`);
+    indent += 2;
+  },
+  after(asyncId) {
+    indent -= 2;
+    const indentStr = ' '.repeat(indent);
+    fs.writeSync(fd, `${indentStr}after:  ${asyncId}\n`);
+  },
+  destroy(asyncId) {
+    const indentStr = ' '.repeat(indent);
+    fs.writeSync(fd, `${indentStr}destroy:  ${asyncId}\n`);
+  },
+}).enable();
+
+net.createServer(() => {}).listen(8080, () => {
+  // Let's wait 10ms before logging the server started.
+  setTimeout(() => {
+    console.log('>>>', async_hooks.executionAsyncId());
+  }, 10);
+});
+```
+
+```cjs
 const async_hooks = require('node:async_hooks');
 const fs = require('node:fs');
 const net = require('node:net');
@@ -661,7 +707,7 @@ import {
   executionAsyncId,
   executionAsyncResource,
   createHook,
-} from 'async_hooks';
+} from 'node:async_hooks';
 const sym = Symbol('state'); // Private symbol to avoid pollution
 
 createHook({
@@ -722,8 +768,10 @@ changes:
 
 ```mjs
 import { executionAsyncId } from 'node:async_hooks';
+import fs from 'node:fs';
 
 console.log(executionAsyncId());  // 1 - bootstrap
+const path = '.';
 fs.open(path, 'r', (err, fd) => {
   console.log(executionAsyncId());  // 6 - open()
 });
@@ -731,8 +779,10 @@ fs.open(path, 'r', (err, fd) => {
 
 ```cjs
 const async_hooks = require('node:async_hooks');
+const fs = require('node:fs');
 
 console.log(async_hooks.executionAsyncId());  // 1 - bootstrap
+const path = '.';
 fs.open(path, 'r', (err, fd) => {
   console.log(async_hooks.executionAsyncId());  // 6 - open()
 });
@@ -764,9 +814,9 @@ See the section on [promise execution tracking][].
 
 ```js
 const server = net.createServer((conn) => {
-  // The resource that caused (or triggered) this callback to be called
-  // was that of the new connection. Thus the return value of triggerAsyncId()
-  // is the asyncId of "conn".
+  // Returns the triggerAsyncId of the server, not of the new connection,
+  // because the callback runs in the execution scope of the server's
+  // MakeCallback().
   async_hooks.triggerAsyncId();
 
 }).listen(port, () => {
@@ -863,6 +913,38 @@ only on chained promises. That means promises not created by `then()`/`catch()`
 will not have the `before` and `after` callbacks fired on them. For more details
 see the details of the V8 [PromiseHooks][] API.
 
+### Disabling promise execution tracking
+
+Tracking promise execution can cause a significant performance overhead.
+To opt out of promise tracking, set `trackPromises` to `false`:
+
+```cjs
+const { createHook } = require('node:async_hooks');
+const { writeSync } = require('node:fs');
+createHook({
+  init(asyncId, type, triggerAsyncId, resource) {
+    // This init hook does not get called when trackPromises is set to false.
+    writeSync(1, `init hook triggered for ${type}\n`);
+  },
+  trackPromises: false,  // Do not track promises.
+}).enable();
+Promise.resolve(1729);
+```
+
+```mjs
+import { createHook } from 'node:async_hooks';
+import { writeSync } from 'node:fs';
+
+createHook({
+  init(asyncId, type, triggerAsyncId, resource) {
+    // This init hook does not get called when trackPromises is set to false.
+    writeSync(1, `init hook triggered for ${type}\n`);
+  },
+  trackPromises: false,  // Do not track promises.
+}).enable();
+Promise.resolve(1729);
+```
+
 ## JavaScript embedder API
 
 Library developers that handle their own asynchronous resources performing tasks
@@ -887,7 +969,7 @@ The documentation for this class has moved [`AsyncLocalStorage`][].
 [`Worker`]: worker_threads.md#class-worker
 [`after` callback]: #afterasyncid
 [`before` callback]: #beforeasyncid
-[`createHook`]: #async_hookscreatehookcallbacks
+[`createHook`]: #async_hookscreatehookoptions
 [`destroy` callback]: #destroyasyncid
 [`executionAsyncResource`]: #async_hooksexecutionasyncresource
 [`init` callback]: #initasyncid-type-triggerasyncid-resource

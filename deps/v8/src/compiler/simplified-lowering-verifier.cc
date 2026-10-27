@@ -13,17 +13,6 @@ namespace v8 {
 namespace internal {
 namespace compiler {
 
-Truncation LeastGeneralTruncation(const Truncation& t1, const Truncation& t2) {
-  if (t1.IsLessGeneralThan(t2)) return t1;
-  CHECK(t2.IsLessGeneralThan(t1));
-  return t2;
-}
-
-Truncation LeastGeneralTruncation(const Truncation& t1, const Truncation& t2,
-                                  const Truncation& t3) {
-  return LeastGeneralTruncation(LeastGeneralTruncation(t1, t2), t3);
-}
-
 bool IsNonTruncatingMachineTypeFor(const MachineType& mt, const Type& type,
                                    Zone* graph_zone) {
   if (type.IsNone()) return true;
@@ -95,7 +84,8 @@ void SimplifiedLoweringVerifier::ReportInvalidTypeCombination(
 }
 
 bool IsModuloTruncation(const Truncation& truncation) {
-  return truncation.IsUsedAsWord32() || truncation.IsUsedAsWord64() ||
+  return truncation.IsUsedAsWord32() ||
+         (Is64() && truncation.IsUsedAsWord64()) ||
          Truncation::Any().IsLessGeneralThan(truncation);
 }
 
@@ -138,6 +128,22 @@ Truncation SimplifiedLoweringVerifier::GeneralizeTruncation(
       // TODO(nicohartmann): Support remaining truncations.
       UNREACHABLE();
   }
+}
+
+Truncation SimplifiedLoweringVerifier::JoinTruncation(const Truncation& t1,
+                                                      const Truncation& t2) {
+  Truncation::TruncationKind kind;
+  if (Truncation::LessGeneral(t1.kind(), t2.kind())) {
+    kind = t1.kind();
+  } else {
+    CHECK(Truncation::LessGeneral(t2.kind(), t1.kind()));
+    kind = t2.kind();
+  }
+  IdentifyZeros identify_zeros = Truncation::LessGeneralIdentifyZeros(
+                                     t1.identify_zeros(), t2.identify_zeros())
+                                     ? t1.identify_zeros()
+                                     : t2.identify_zeros();
+  return Truncation(kind, identify_zeros);
 }
 
 void SimplifiedLoweringVerifier::VisitNode(Node* node,
@@ -232,9 +238,9 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       } else {
         ReportInvalidTypeCombination(node, {left_type, right_type});
       }
-      Truncation output_trunc = LeastGeneralTruncation(InputTruncation(node, 0),
-                                                       InputTruncation(node, 1),
-                                                       Truncation::Word32());
+      Truncation output_trunc =
+          JoinTruncation(InputTruncation(node, 0), InputTruncation(node, 1),
+                         Truncation::Word32());
       CHECK(IsModuloTruncation(output_trunc));
       CheckAndSet(node, output_type, output_trunc);
       break;
@@ -256,9 +262,9 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       } else {
         ReportInvalidTypeCombination(node, {left_type, right_type});
       }
-      Truncation output_trunc = LeastGeneralTruncation(InputTruncation(node, 0),
-                                                       InputTruncation(node, 1),
-                                                       Truncation::Word32());
+      Truncation output_trunc =
+          JoinTruncation(InputTruncation(node, 0), InputTruncation(node, 1),
+                         Truncation::Word32());
       CHECK(IsModuloTruncation(output_trunc));
       CheckAndSet(node, output_type, output_trunc);
       break;
@@ -275,8 +281,8 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       break;
     }
     case IrOpcode::kChangeFloat64ToInt64: {
-      Truncation output_trunc = LeastGeneralTruncation(InputTruncation(node, 0),
-                                                       Truncation::Word64());
+      Truncation output_trunc =
+          JoinTruncation(InputTruncation(node, 0), Truncation::Word64());
       CheckAndSet(node, InputType(node, 0), output_trunc);
       break;
     }
@@ -305,9 +311,9 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
         // Invalid type combination.
         ReportInvalidTypeCombination(node, {left_type, right_type});
       }
-      Truncation output_trunc = LeastGeneralTruncation(InputTruncation(node, 0),
-                                                       InputTruncation(node, 1),
-                                                       Truncation::Word64());
+      Truncation output_trunc =
+          JoinTruncation(InputTruncation(node, 0), InputTruncation(node, 1),
+                         Truncation::Word64());
       CHECK(IsModuloTruncation(output_trunc));
       CheckAndSet(node, output_type, output_trunc);
       break;
@@ -337,9 +343,9 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
         // Invalid type combination.
         ReportInvalidTypeCombination(node, {left_type, right_type});
       }
-      Truncation output_trunc = LeastGeneralTruncation(InputTruncation(node, 0),
-                                                       InputTruncation(node, 1),
-                                                       Truncation::Word64());
+      Truncation output_trunc =
+          JoinTruncation(InputTruncation(node, 0), InputTruncation(node, 1),
+                         Truncation::Word64());
       CHECK(IsModuloTruncation(output_trunc));
       CheckAndSet(node, output_type, output_trunc);
       break;
@@ -365,8 +371,8 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
     case IrOpcode::kChangeTaggedSignedToInt64: {
       Type input_type = InputType(node, 0);
       CHECK(input_type.Is(Type::Number()));
-      Truncation output_trunc = LeastGeneralTruncation(InputTruncation(node, 0),
-                                                       Truncation::Word64());
+      Truncation output_trunc =
+          JoinTruncation(InputTruncation(node, 0), Truncation::Word64());
       CheckAndSet(node, input_type, output_trunc);
       break;
     }
@@ -408,7 +414,6 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
           default:
             UNREACHABLE();
         }
-        CheckType(node, output_type);
       }
 
       if (p.override_output_type()) {
@@ -460,6 +465,7 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       CASE(DeoptimizeUnless)
       CASE(TrapIf)
       CASE(TrapUnless)
+      CASE(Assert)
       CASE(TailCall)
       CASE(Terminate)
       CASE(Throw)
@@ -471,6 +477,7 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       CASE(NumberConstant)
       CASE(PointerConstant)
       CASE(CompressedHeapConstant)
+      CASE(TrustedHeapConstant)
       CASE(RelocatableInt32Constant)
       CASE(RelocatableInt64Constant)
       // Inner operators
@@ -493,10 +500,11 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       CASE(Projection)
       CASE(Retain)
       CASE(MapGuard)
-      CASE(FoldConstant)
       CASE(Unreachable)
       CASE(Dead)
       CASE(Plug)
+      CASE(MajorGCForCompilerTesting)
+      IF_SANDBOX(CASE, LoadTrustedPointer)
       CASE(StaticAssert)
       // Simplified change operators
       CASE(ChangeTaggedSignedToInt32)
@@ -505,16 +513,22 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       CASE(ChangeTaggedToUint32)
       CASE(ChangeTaggedToFloat64)
       CASE(ChangeTaggedToTaggedSigned)
+      CASE(ChangeSmiOrHoleToFloat64)
+      CASE(ChangeNumberOrHoleToFloat64)
       CASE(ChangeInt64ToTagged)
       CASE(ChangeUint32ToTagged)
       CASE(ChangeFloat64ToTagged)
       CASE(ChangeFloat64ToTaggedPointer)
+      CASE(ChangeFloat64OrUndefinedToTagged)
       CASE(ChangeTaggedToBit)
       CASE(ChangeBitToTagged)
       CASE(ChangeInt64ToBigInt)
       CASE(ChangeUint64ToBigInt)
-      CASE(TruncateTaggedToWord32)
+      CASE(TruncateNumberOrOddballToWord32)
+      CASE(TruncateSmiOrHoleToWord32)
+      CASE(TruncateNumberOrOddballOrHoleToWord32)
       CASE(TruncateTaggedToFloat64)
+      CASE(TruncateTaggedToFloat64PreserveUndefined)
       CASE(TruncateTaggedPointerToBit)
       // Simplified checked operators
       CASE(CheckedInt32Add)
@@ -524,6 +538,8 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       CASE(CheckedUint32Div)
       CASE(CheckedUint32Mod)
       CASE(CheckedInt32Mul)
+      CASE(CheckedAdditiveSafeIntegerAdd)
+      CASE(CheckedAdditiveSafeIntegerSub)
       CASE(CheckedInt64Add)
       CASE(CheckedInt64Sub)
       CASE(CheckedInt64Mul)
@@ -531,6 +547,7 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       CASE(CheckedInt64Mod)
       CASE(CheckedInt32ToTaggedSigned)
       CASE(CheckedInt64ToInt32)
+      CASE(CheckedInt64ToAdditiveSafeInteger)
       CASE(CheckedInt64ToTaggedSigned)
       CASE(CheckedUint32Bounds)
       CASE(CheckedUint32ToInt32)
@@ -539,13 +556,19 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       CASE(CheckedUint64ToInt32)
       CASE(CheckedUint64ToInt64)
       CASE(CheckedUint64ToTaggedSigned)
+      CASE(CheckedFloat64ToAdditiveSafeInteger)
       CASE(CheckedFloat64ToInt64)
+      CASE(CheckedInt32ToUint64)
+      CASE(CheckedInt64ToUint64)
+      CASE(CheckedFloat64ToUint64)
       CASE(CheckedTaggedSignedToInt32)
       CASE(CheckedTaggedToInt32)
       CASE(CheckedTaggedToArrayIndex)
       CASE(CheckedTruncateTaggedToWord32)
       CASE(CheckedTaggedToFloat64)
+      CASE(CheckedTaggedToAdditiveSafeInteger)
       CASE(CheckedTaggedToInt64)
+      CASE(CheckedTaggedToUint64)
       SIMPLIFIED_COMPARE_BINOP_LIST(CASE)
       SIMPLIFIED_NUMBER_BINOP_LIST(CASE)
       SIMPLIFIED_BIGINT_BINOP_LIST(CASE)
@@ -606,10 +629,13 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       MACHINE_ATOMIC_OP_LIST(CASE)
       CASE(AbortCSADcheck)
       CASE(DebugBreak)
+      IF_HARDWARE_SANDBOX(CASE, SwitchSandboxMode)
       CASE(Comment)
       CASE(Load)
       CASE(LoadImmutable)
       CASE(Store)
+      CASE(StorePair)
+      CASE(StoreIndirectPointer)
       CASE(StackSlot)
       CASE(Word32Popcnt)
       CASE(Word64Popcnt)
@@ -644,7 +670,9 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       CASE(BitcastWord32ToWord64)
       CASE(ChangeInt64ToFloat64)
       CASE(ChangeUint32ToFloat64)
+      CASE(ChangeFloat16RawBitsToFloat64)
       CASE(TruncateFloat64ToFloat32)
+      CASE(TruncateFloat64ToFloat16RawBits)
       CASE(TruncateInt64ToInt32)
       CASE(RoundFloat64ToInt32)
       CASE(RoundInt32ToFloat32)
@@ -667,7 +695,10 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       CASE(Float64Select)
       CASE(LoadStackCheckOffset)
       CASE(LoadFramePointer)
+      IF_WASM(CASE, LoadStackPointer)
+      IF_WASM(CASE, SetStackPointer)
       CASE(LoadParentFramePointer)
+      CASE(LoadRootRegister)
       CASE(UnalignedLoad)
       CASE(UnalignedStore)
       CASE(Int32PairAdd)
@@ -676,8 +707,10 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       CASE(Word32PairShl)
       CASE(Word32PairShr)
       CASE(Word32PairSar)
-      CASE(ProtectedLoad)
-      CASE(ProtectedStore)
+      CASE(TrappingLoad)
+      CASE(TrappingStore)
+      CASE(LoadTrapOnNull)
+      CASE(StoreTrapOnNull)
       CASE(MemoryBarrier)
       CASE(SignExtendWord8ToInt32)
       CASE(SignExtendWord16ToInt32)
@@ -691,13 +724,16 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       JS_CONTEXT_OP_LIST(CASE)
       JS_CALL_OP_LIST(CASE)
       JS_CONSTRUCT_OP_LIST(CASE)
+      CASE(JSAsyncFunctionAwait)
       CASE(JSAsyncFunctionEnter)
       CASE(JSAsyncFunctionReject)
       CASE(JSAsyncFunctionResolve)
       CASE(JSCallRuntime)
+      CASE(JSDetachContextCell)
       CASE(JSForInEnumerate)
       CASE(JSForInNext)
       CASE(JSForInPrepare)
+      CASE(JSForOfNext)
       CASE(JSGetIterator)
       CASE(JSLoadMessage)
       CASE(JSStoreMessage)
@@ -706,7 +742,7 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       CASE(JSGetImportMeta)
       CASE(JSGeneratorStore)
       CASE(JSGeneratorRestoreContinuation)
-      CASE(JSGeneratorRestoreContext)
+      CASE(JSGeneratorRestoreContextNoCell)
       CASE(JSGeneratorRestoreRegister)
       CASE(JSGeneratorRestoreInputOrDebugPos)
       CASE(JSFulfillPromise)
@@ -720,7 +756,8 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
         // TODO(nicohartmann@): These operators might need to be supported.
         break;
       }
-      MACHINE_SIMD_OP_LIST(CASE)
+      MACHINE_SIMD128_OP_LIST(CASE)
+      IF_SIMD256(MACHINE_SIMD256_OP_LIST, CASE)
       IF_WASM(SIMPLIFIED_WASM_OP_LIST, CASE) {
         // SIMD operators should not be in the graph, yet.
         UNREACHABLE();

@@ -1169,6 +1169,7 @@ $L$key_epilogue:
 	DB	0F3h,0C3h		;repret
 
 $L$SEH_end_Camellia_Ekeygen:
+section	.rdata rdata align=64
 ALIGN	64
 $L$Camellia_SIGMA:
 	DD	0x3bcc908b,0xa09e667f,0x4caa73b2,0xb67ae858
@@ -1688,6 +1689,8 @@ $L$Camellia_SBOX:
 	DD	0x008f8f8f,0xe300e3e3
 	DD	0x00010101,0x40004040
 	DD	0x003d3d3d,0x4f004f4f
+section	.text code align=64
+
 global	Camellia_cbc_encrypt
 
 ALIGN	16
@@ -1956,8 +1959,9 @@ $L$cbc_abort:
 $L$SEH_end_Camellia_cbc_encrypt:
 
 DB	67,97,109,101,108,108,105,97,32,102,111,114,32,120,56,54
-DB	95,54,52,32,98,121,32,60,97,112,112,114,111,64,111,112
-DB	101,110,115,115,108,46,111,114,103,62,0
+DB	95,54,52,32,98,121,32,60,104,116,116,112,115,58,47,47
+DB	103,105,116,104,117,98,46,99,111,109,47,100,111,116,45,97
+DB	115,109,62,0
 EXTERN	__imp_RtlVirtualUnwind
 
 ALIGN	16

@@ -1,7 +1,6 @@
 'use strict';
 const common = require('../common');
 const assert = require('assert');
-const childProcess = require('child_process');
 const url = require('url');
 
 // https://github.com/joyent/node/issues/568
@@ -82,24 +81,15 @@ if (common.hasIntl) {
     'git+ssh://git@github.com:npm/npm',
   ];
   badURLs.forEach((badURL) => {
-    childProcess.exec(`${process.execPath} -e "url.parse('${badURL}')"`,
-                      common.mustCall((err, stdout, stderr) => {
-                        assert.strictEqual(err, null);
-                        assert.strictEqual(stdout, '');
-                        assert.match(stderr, /\[DEP0170\] DeprecationWarning:/);
-                      })
-    );
+    common.spawnPromisified(process.execPath, ['-e', `url.parse(${JSON.stringify(badURL)})`])
+      .then(common.mustCall(({ code, stdout, stderr }) => {
+        assert.strictEqual(code, 1);
+      }));
   });
 
-  // Warning should only happen once per process.
-  const expectedWarning = [
-    `The URL ${badURLs[0]} is invalid. Future versions of Node.js will throw an error.`,
-    'DEP0170',
-  ];
-  common.expectWarning({
-    DeprecationWarning: expectedWarning,
-  });
   badURLs.forEach((badURL) => {
-    url.parse(badURL);
+    assert.throws(() => url.parse(badURL), {
+      code: 'ERR_INVALID_ARG_VALUE',
+    });
   });
 }

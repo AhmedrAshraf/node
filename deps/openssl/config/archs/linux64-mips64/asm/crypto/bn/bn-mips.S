@@ -1,4 +1,4 @@
-#include "mips_arch.h"
+#include "arch/mips_arch.h"
 
 #if defined(_MIPS_ARCH_MIPS64R6)
 # define ddivu(rs,rt)
@@ -16,7 +16,7 @@
 
 .rdata
 .asciiz	"mips3.s, Version 1.2"
-.asciiz	"MIPS II/III/IV ISA artwork by Andy Polyakov <appro@fy.chalmers.se>"
+.asciiz	"MIPS II/III/IV ISA artwork by Andy Polyakov <https://github.com/dot-asm>"
 
 .text
 .set	noat
@@ -569,7 +569,7 @@ bn_sub_words_internal:
 
 #if 0
 /*
- * The bn_div_3_words entry point is re-used for constant-time interface.
+ * The bn_div_3_words entry point is reused for constant-time interface.
  * Implementation is retained as historical reference.
  */
 .align 5
@@ -770,7 +770,7 @@ bn_mul_comba8:
 				# bug)" warning. If anybody out there
 				# has a clue about how to circumvent
 				# this do send me a note.
-				#		<appro@fy.chalmers.se>
+				#		<https://github.com/dot-asm>
 
 	ld	$8,0($6)
 	ld	$13,8($5)

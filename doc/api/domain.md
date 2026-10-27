@@ -3,6 +3,10 @@
 <!-- YAML
 deprecated: v1.4.2
 changes:
+  - version: REPLACEME
+    pr-url: https://github.com/nodejs/node/pull/65074
+    description: Loading the module now emits a runtime deprecation warning
+                 (`DEP0032`).
   - version: v8.8.0
     pr-url: https://github.com/nodejs/node/pull/15695
     description: Any `Promise`s created in VM contexts no longer have a
@@ -21,12 +25,11 @@ changes:
 
 <!-- source_link=lib/domain.js -->
 
-**This module is pending deprecation.** Once a replacement API has been
-finalized, this module will be fully deprecated. Most developers should
-**not** have cause to use this module. Users who absolutely must have
-the functionality that domains provide may rely on it for the time being
-but should expect to have to migrate to a different solution
-in the future.
+**This module is deprecated and should not be used.** Loading the module emits
+a runtime deprecation warning (`DEP0032`). Most developers should **not** have
+cause to use this module. Users who absolutely must have the functionality
+that domains provide may rely on it for the time being but should expect to
+have to migrate to a different solution in the future.
 
 Domains provide a way to handle multiple different IO operations as a
 single group. If any of the event emitters or callbacks registered to a
@@ -212,7 +215,7 @@ If domains are in use, then all **new** `EventEmitter` objects (including
 Stream objects, requests, responses, etc.) will be implicitly bound to
 the active domain at the time of their creation.
 
-Additionally, callbacks passed to lowlevel event loop requests (such as
+Additionally, callbacks passed to low-level event loop requests (such as
 to `fs.open()`, or other callback-taking methods) will automatically be
 bound to the active domain. If they throw, then the domain will catch
 the error.
@@ -287,26 +290,28 @@ To handle the errors that it catches, listen to its `'error'` event.
 
 ### `domain.members`
 
-* {Array}
+* Type: {Array}
 
-An array of timers and event emitters that have been explicitly added
-to the domain.
+An array of event emitters that have been explicitly added to the domain.
 
 ### `domain.add(emitter)`
 
-* `emitter` {EventEmitter|Timer} emitter or timer to be added to the domain
+<!-- YAML
+changes:
+  - version: v9.3.0
+    pr-url: https://github.com/nodejs/node/pull/16222
+    description: No longer accepts timer objects.
+-->
+
+* `emitter` {EventEmitter} emitter to be added to the domain
 
 Explicitly adds an emitter to the domain. If any event handlers called by
 the emitter throw an error, or if the emitter emits an `'error'` event, it
 will be routed to the domain's `'error'` event, just like with implicit
 binding.
 
-This also works with timers that are returned from [`setInterval()`][] and
-[`setTimeout()`][]. If their callback function throws, it will be caught by
-the domain `'error'` handler.
-
-If the Timer or `EventEmitter` was already bound to a domain, it is removed
-from that one, and bound to this one instead.
+If the `EventEmitter` was already bound to a domain, it is removed from that
+one, and bound to this one instead.
 
 ### `domain.bind(callback)`
 
@@ -398,7 +403,7 @@ d.on('error', (er) => {
 
 ### `domain.remove(emitter)`
 
-* `emitter` {EventEmitter|Timer} emitter or timer to be removed from the domain
+* `emitter` {EventEmitter} emitter to be removed from the domain
 
 The opposite of [`domain.add(emitter)`][]. Removes domain handling from the
 specified emitter.
@@ -409,7 +414,7 @@ specified emitter.
 * `...args` {any}
 
 Run the supplied function in the context of the domain, implicitly
-binding all event emitters, timers, and lowlevel requests that are
+binding all event emitters, timers, and low-level requests that are
 created in that context. Optionally, arguments can be passed to
 the function.
 
@@ -484,6 +489,4 @@ promises. In other words, no `'error'` event will be emitted for unhandled
 [`domain.add(emitter)`]: #domainaddemitter
 [`domain.bind(callback)`]: #domainbindcallback
 [`domain.exit()`]: #domainexit
-[`setInterval()`]: timers.md#setintervalcallback-delay-args
-[`setTimeout()`]: timers.md#settimeoutcallback-delay-args
 [`throw`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/throw

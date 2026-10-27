@@ -32,18 +32,18 @@ for (let i = 0; i < buffer.length; i++) {
   buffer[i] = i % 256;
 }
 
-const server = http.Server(function(req, res) {
+const server = new http.Server(common.mustCallAtLeast(function(req, res) {
   server.close();
 
   let i = 0;
 
-  req.on('data', (d) => {
+  req.on('data', common.mustCallAtLeast((d) => {
     measuredSize += d.length;
     for (let j = 0; j < d.length; j++) {
       assert.strictEqual(d[j], buffer[i]);
       i++;
     }
-  });
+  }));
 
   req.on('end', common.mustCall(() => {
     assert.strictEqual(measuredSize, bufferSize);
@@ -51,10 +51,11 @@ const server = http.Server(function(req, res) {
     res.write('thanks');
     res.end();
   }));
-});
+}));
 
 server.listen(0, common.mustCall(() => {
   const req = http.request({
+    agent: false,
     port: server.address().port,
     method: 'POST',
     path: '/',

@@ -43,12 +43,13 @@ class NodeBIO : public MemoryRetainer {
  public:
   ~NodeBIO() override;
 
-  static BIOPointer New(Environment* env = nullptr);
+  static ncrypto::BIOPointer New(Environment* env = nullptr);
 
   // NewFixed takes a copy of `len` bytes from `data` and returns a BIO that,
   // when read from, returns those bytes followed by EOF.
-  static BIOPointer NewFixed(const char* data, size_t len,
-                             Environment* env = nullptr);
+  static ncrypto::BIOPointer NewFixed(const char* data,
+                                      size_t len,
+                                      Environment* env = nullptr);
 
   // Move read head to next buffer if needed
   void TryMoveReadHead();
@@ -149,21 +150,21 @@ class NodeBIO : public MemoryRetainer {
 
   class Buffer {
    public:
-    Buffer(Environment* env, size_t len) : env_(env),
-                                           read_pos_(0),
-                                           write_pos_(0),
-                                           len_(len),
-                                           next_(nullptr) {
-      data_ = new char[len];
-      if (env_ != nullptr)
-        env_->isolate()->AdjustAmountOfExternalAllocatedMemory(len);
+    Buffer(Environment* env, size_t len)
+        : env_(env),
+          read_pos_(0),
+          write_pos_(0),
+          len_(len),
+          next_(nullptr),
+          data_(new char[len]) {
+      if (env_ != nullptr) {
+        env_->external_memory_accounter()->Increase(env_->isolate(), len);
+      }
     }
 
     ~Buffer() {
-      delete[] data_;
       if (env_ != nullptr) {
-        const int64_t len = static_cast<int64_t>(len_);
-        env_->isolate()->AdjustAmountOfExternalAllocatedMemory(-len);
+        env_->external_memory_accounter()->Decrease(env_->isolate(), len_);
       }
     }
 
@@ -172,7 +173,7 @@ class NodeBIO : public MemoryRetainer {
     size_t write_pos_;
     size_t len_;
     Buffer* next_;
-    char* data_;
+    std::unique_ptr<char[]> data_;
   };
 
   Environment* env_ = nullptr;
@@ -182,8 +183,6 @@ class NodeBIO : public MemoryRetainer {
   int eof_return_ = -1;
   Buffer* read_head_ = nullptr;
   Buffer* write_head_ = nullptr;
-
-  friend void node::crypto::InitCryptoOnce();
 };
 
 }  // namespace crypto

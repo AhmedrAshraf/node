@@ -9,10 +9,10 @@ permissions:
 
 jobs:
   label:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
 
     steps:
-      - uses: nodejs/node-pr-labeler@v1
+      - uses: nodejs/node-pr-labeler@dfe5eb3b099a487644e32567a482744620876ab3  # v1
         with:
           repo-token: ${{ secrets.GH_USER_TOKEN }}
           configuration-path: .github/label-pr-config.yml

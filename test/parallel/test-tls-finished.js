@@ -1,6 +1,8 @@
 'use strict';
 
 const common = require('../common');
+
+const { isBoringSSL } = require('../common/crypto');
 const fixtures = require('../common/fixtures');
 
 if (!common.hasCrypto)
@@ -20,7 +22,8 @@ const msg = {};
 const pem = (n) => fixtures.readKey(`${n}.pem`);
 const server = tls.createServer({
   key: pem('agent1-key'),
-  cert: pem('agent1-cert')
+  cert: pem('agent1-cert'),
+  ...(isBoringSSL ? { maxVersion: 'TLSv1.2' } : {}),
 }, common.mustCall((alice) => {
   msg.server = {
     alice: alice.getFinished(),
@@ -32,7 +35,8 @@ const server = tls.createServer({
 server.listen(0, common.mustCall(() => {
   const bob = tls.connect({
     port: server.address().port,
-    rejectUnauthorized: false
+    rejectUnauthorized: false,
+    ...(isBoringSSL ? { maxVersion: 'TLSv1.2' } : {}),
   }, common.mustCall(() => {
     msg.client = {
       alice: bob.getPeerFinished(),

@@ -1,18 +1,15 @@
-<!--
-  NB(chrisdickinson): if you move this file, be sure to update
-  tools/doc/html.mjs to point at the new location.
--->
+# Index
 
 <!--introduced_in=v0.10.0-->
 
 * [About this documentation](documentation.md)
-* [Usage and example](synopsis.md)
 
 <hr class="line"/>
 
 * [Assertion testing](assert.md)
 * [Asynchronous context tracking](async_context.md)
 * [Async hooks](async_hooks.md)
+* [Benchmark runner](bench.md)
 * [Buffer](buffer.md)
 * [C++ addons](addons.md)
 * [C/C++ addons with Node-API](n-api.md)
@@ -21,26 +18,29 @@
 * [Cluster](cluster.md)
 * [Command-line options](cli.md)
 * [Console](console.md)
-* [Corepack](corepack.md)
 * [Crypto](crypto.md)
 * [Debugger](debugger.md)
 * [Deprecated APIs](deprecations.md)
 * [Diagnostics Channel](diagnostics_channel.md)
 * [DNS](dns.md)
 * [Domain](domain.md)
+* [Environment Variables](environment_variables.md)
 * [Errors](errors.md)
 * [Events](events.md)
 * [File system](fs.md)
+* [FFI](ffi.md)
 * [Globals](globals.md)
 * [HTTP](http.md)
 * [HTTP/2](http2.md)
 * [HTTPS](https.md)
 * [Inspector](inspector.md)
 * [Internationalization](intl.md)
+* [Iterable Streams API](stream_iter.md)
 * [Modules: CommonJS modules](modules.md)
 * [Modules: ECMAScript modules](esm.md)
 * [Modules: `node:module` API](module.md)
 * [Modules: Packages](packages.md)
+* [Modules: TypeScript](typescript.md)
 * [Net](net.md)
 * [OS](os.md)
 * [Path](path.md)
@@ -52,6 +52,8 @@
 * [Readline](readline.md)
 * [REPL](repl.md)
 * [Report](report.md)
+* [Single executable applications](single-executable-applications.md)
+* [SQLite](sqlite.md)
 * [Stream](stream.md)
 * [String decoder](string_decoder.md)
 * [Test runner](test.md)
@@ -63,6 +65,7 @@
 * [URL](url.md)
 * [Utilities](util.md)
 * [V8](v8.md)
+* [Virtual File System](vfs.md)
 * [VM](vm.md)
 * [WASI](wasi.md)
 * [Web Crypto API](webcrypto.md)

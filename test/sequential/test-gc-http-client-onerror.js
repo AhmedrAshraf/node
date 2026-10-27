@@ -4,9 +4,9 @@
 // but with an on('error') handler that does nothing.
 
 const common = require('../common');
-const onGC = require('../common/ongc');
+const { onGC } = require('../common/gc');
 
-const cpus = require('os').cpus().length;
+const cpus = require('os').availableParallelism();
 
 function serverHandler(req, res) {
   req.resume();
@@ -37,7 +37,7 @@ function getAll(requestsRemaining) {
   const req = http.get({
     hostname: 'localhost',
     pathname: '/',
-    port: server.address().port
+    port: server.address().port,
   }, cb).on('error', onerror);
 
   count++;

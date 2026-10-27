@@ -3,7 +3,7 @@
 
 const common = require('../common');
 
-if (common.isPi) {
+if (common.isPi()) {
   common.skip('Too slow for Raspberry Pi devices');
 }
 
@@ -98,7 +98,7 @@ const env = {
     env: {
       ...env,
       limit: 1,
-      limit2: 2
+      limit2: 2,
     },
   });
   console.log(child.stdout.toString());

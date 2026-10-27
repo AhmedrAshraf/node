@@ -9,21 +9,25 @@ const util = require('util');
 // run the function with those settings.
 // if not, then queue up a bunch of child processes.
 const bench = common.createBenchmark(main, {
-  len: [102400, 1024 * 1024 * 16],
+  len: [102400, 1024 * 64 * 16],
   type: ['utf', 'asc', 'buf'],
-  dur: [5]
+  dur: [5],
 }, {
   test: { len: 1024 },
-  flags: [ '--expose-internals', '--no-warnings' ]
+  flags: [ '--expose-internals', '--no-warnings' ],
 });
 
 function main({ dur, len, type }) {
   const {
     TCP,
     TCPConnectWrap,
-    constants: TCPConstants
+    constants: TCPConstants,
   } = common.binding('tcp_wrap');
-  const { WriteWrap } = common.binding('stream_wrap');
+  const {
+    WriteWrap,
+    kReadBytesOrError,
+    streamBaseState,
+  } = common.binding('stream_wrap');
   const PORT = common.PORT;
 
   const serverHandle = new TCP(TCPConstants.SERVER);
@@ -55,9 +59,7 @@ function main({ dur, len, type }) {
       if (!buffer)
         fail('read');
 
-      // Don't slice the buffer. The point of this is to isolate, not
-      // simulate real traffic.
-      bytes += buffer.byteLength;
+      bytes += streamBaseState[kReadBytesOrError];
     };
 
     clientHandle.readStart();

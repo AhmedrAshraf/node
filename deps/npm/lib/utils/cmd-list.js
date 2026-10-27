@@ -1,11 +1,82 @@
 const abbrev = require('abbrev')
-const localeCompare = require('@isaacs/string-locale-compare')('en')
 
-// plumbing should not have any aliases
+// These correspond to filenames in lib/commands
+// Please keep this list sorted alphabetically
+const commands = [
+  'access',
+  'approve-scripts',
+  'audit',
+  'bugs',
+  'cache',
+  'ci',
+  'completion',
+  'config',
+  'dedupe',
+  'deny-scripts',
+  'deprecate',
+  'diff',
+  'dist-tag',
+  'docs',
+  'doctor',
+  'edit',
+  'exec',
+  'explain',
+  'explore',
+  'find-dupes',
+  'fund',
+  'get',
+  'help',
+  'help-search',
+  'init',
+  'install',
+  'install-ci-test',
+  'install-scripts',
+  'install-test',
+  'link',
+  'll',
+  'login',
+  'logout',
+  'ls',
+  'org',
+  'outdated',
+  'owner',
+  'pack',
+  'patch',
+  'ping',
+  'pkg',
+  'prefix',
+  'profile',
+  'prune',
+  'publish',
+  'query',
+  'rebuild',
+  'repo',
+  'restart',
+  'root',
+  'run',
+  'sbom',
+  'search',
+  'set',
+  'stage',
+  'start',
+  'stop',
+  'team',
+  'test',
+  'token',
+  'trust',
+  'undeprecate',
+  'uninstall',
+  'unpublish',
+  'update',
+  'version',
+  'view',
+  'whoami',
+]
+
+// These must resolve to an entry in commands
 const aliases = {
 
   // aliases
-  login: 'adduser',
   author: 'owner',
   home: 'docs',
   issues: 'bugs',
@@ -27,6 +98,7 @@ const aliases = {
   i: 'install',
   it: 'install-test',
   cit: 'install-ci-test',
+  u: 'update',
   up: 'update',
   c: 'config',
   s: 'search',
@@ -35,9 +107,9 @@ const aliases = {
   t: 'test',
   ddp: 'dedupe',
   v: 'view',
-  run: 'run-script',
+  'run-script': 'run',
   'clean-install': 'ci',
-  'clean-install-test': 'cit',
+  'clean-install-test': 'install-ci-test',
   x: 'exec',
   why: 'explain',
   la: 'll',
@@ -62,92 +134,46 @@ const aliases = {
   'dist-tags': 'dist-tag',
   upgrade: 'update',
   udpate: 'update',
-  rum: 'run-script',
-  sit: 'cit',
-  urn: 'run-script',
+  rum: 'run',
+  sit: 'install-ci-test',
+  urn: 'run',
   ogr: 'org',
-  'add-user': 'adduser',
+
 }
 
-// these are filenames in .
-const commands = [
-  'access',
-  'adduser',
-  'audit',
-  'bin',
-  'bugs',
-  'cache',
-  'ci',
-  'completion',
-  'config',
-  'dedupe',
-  'deprecate',
-  'diff',
-  'dist-tag',
-  'docs',
-  'doctor',
-  'edit',
-  'exec',
-  'explain',
-  'explore',
-  'find-dupes',
-  'fund',
-  'get',
-  'help',
-  'hook',
-  'init',
-  'install',
-  'install-ci-test',
-  'install-test',
-  'link',
-  'll',
-  'login', // This is an alias for `adduser` but it can be confusing
-  'logout',
-  'ls',
-  'org',
-  'outdated',
-  'owner',
-  'pack',
-  'ping',
-  'pkg',
-  'prefix',
-  'profile',
-  'prune',
-  'publish',
-  'query',
-  'rebuild',
-  'repo',
-  'restart',
-  'root',
-  'run-script',
-  'search',
-  'set',
-  'set-script',
-  'shrinkwrap',
-  'star',
-  'stars',
-  'start',
-  'stop',
-  'team',
-  'test',
-  'token',
-  'uninstall',
-  'unpublish',
-  'unstar',
-  'update',
-  'version',
-  'view',
-  'whoami',
-]
+const deref = (c) => {
+  if (!c) {
+    return
+  }
 
-const plumbing = ['birthday', 'help-search']
-const allCommands = [...commands, ...plumbing].sort(localeCompare)
-const abbrevs = abbrev(commands.concat(Object.keys(aliases)))
+  // Translate camelCase to snake-case (i.e. installTest to install-test)
+  if (c.match(/[A-Z]/)) {
+    c = c.replace(/([A-Z])/g, m => '-' + m.toLowerCase())
+  }
+
+  // if they asked for something exactly we are done
+  if (commands.includes(c)) {
+    return c
+  }
+
+  // if they asked for a direct alias
+  if (aliases[c]) {
+    return aliases[c]
+  }
+
+  const abbrevs = abbrev(commands.concat(Object.keys(aliases)))
+
+  // first deref the abbrev,
+  // if there is one then resolve any aliases so `npm install-cl` will resolve to `install-clean` then to `ci`
+  let a = abbrevs[c]
+  while (aliases[a]) {
+    a = aliases[a]
+  }
+  return a
+}
 
 module.exports = {
-  abbrevs,
   aliases,
   commands,
-  plumbing,
-  allCommands,
+  deref,
 }

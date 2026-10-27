@@ -18,6 +18,7 @@ Running test: testScopesPaused
         }
         scopeChain : [
             [0] : {
+                empty : true
                 endLocation : {
                     columnNumber : 3
                     lineNumber : 5
@@ -91,9 +92,10 @@ Running test: testScopesPaused
         }
         scopeChain : [
             [0] : {
+                empty : true
                 endLocation : {
-                    columnNumber : 3
-                    lineNumber : 15
+                    columnNumber : 13
+                    lineNumber : 14
                     scriptId : <scriptId>
                 }
                 name : run
@@ -104,8 +106,8 @@ Running test: testScopesPaused
                     type : object
                 }
                 startLocation : {
-                    columnNumber : 2
-                    lineNumber : 11
+                    columnNumber : 4
+                    lineNumber : 12
                     scriptId : <scriptId>
                 }
                 type : local
@@ -187,8 +189,8 @@ Running test: testScopesPaused
         callFrameId : <callFrameId>
         canBeRestarted : true
         functionLocation : {
-            columnNumber : 2
-            lineNumber : 11
+            columnNumber : 4
+            lineNumber : 12
             scriptId : <scriptId>
         }
         functionName : <instance_members_initializer>
@@ -199,9 +201,10 @@ Running test: testScopesPaused
         }
         scopeChain : [
             [0] : {
+                empty : true
                 endLocation : {
-                    columnNumber : 3
-                    lineNumber : 15
+                    columnNumber : 13
+                    lineNumber : 14
                     scriptId : <scriptId>
                 }
                 name : <instance_members_initializer>
@@ -212,8 +215,8 @@ Running test: testScopesPaused
                     type : object
                 }
                 startLocation : {
-                    columnNumber : 2
-                    lineNumber : 11
+                    columnNumber : 4
+                    lineNumber : 12
                     scriptId : <scriptId>
                 }
                 type : local
@@ -272,6 +275,7 @@ Running test: testScopesPaused
         }
         scopeChain : [
             [0] : {
+                empty : true
                 endLocation : {
                     columnNumber : 2
                     lineNumber : 11
@@ -421,8 +425,8 @@ Running test: testScopesPaused
         callFrameId : <callFrameId>
         canBeRestarted : true
         functionLocation : {
-            columnNumber : 2
-            lineNumber : 11
+            columnNumber : 4
+            lineNumber : 12
             scriptId : <scriptId>
         }
         functionName : <instance_members_initializer>
@@ -433,9 +437,10 @@ Running test: testScopesPaused
         }
         scopeChain : [
             [0] : {
+                empty : true
                 endLocation : {
-                    columnNumber : 3
-                    lineNumber : 15
+                    columnNumber : 13
+                    lineNumber : 14
                     scriptId : <scriptId>
                 }
                 name : <instance_members_initializer>
@@ -446,8 +451,8 @@ Running test: testScopesPaused
                     type : object
                 }
                 startLocation : {
-                    columnNumber : 2
-                    lineNumber : 11
+                    columnNumber : 4
+                    lineNumber : 12
                     scriptId : <scriptId>
                 }
                 type : local
@@ -506,6 +511,7 @@ Running test: testScopesPaused
         }
         scopeChain : [
             [0] : {
+                empty : true
                 endLocation : {
                     columnNumber : 2
                     lineNumber : 11
@@ -655,8 +661,8 @@ Running test: testScopesPaused
         callFrameId : <callFrameId>
         canBeRestarted : true
         functionLocation : {
-            columnNumber : 2
-            lineNumber : 11
+            columnNumber : 4
+            lineNumber : 12
             scriptId : <scriptId>
         }
         functionName : <instance_members_initializer>
@@ -667,9 +673,10 @@ Running test: testScopesPaused
         }
         scopeChain : [
             [0] : {
+                empty : true
                 endLocation : {
-                    columnNumber : 3
-                    lineNumber : 15
+                    columnNumber : 13
+                    lineNumber : 14
                     scriptId : <scriptId>
                 }
                 name : <instance_members_initializer>
@@ -680,8 +687,8 @@ Running test: testScopesPaused
                     type : object
                 }
                 startLocation : {
-                    columnNumber : 2
-                    lineNumber : 11
+                    columnNumber : 4
+                    lineNumber : 12
                     scriptId : <scriptId>
                 }
                 type : local
@@ -740,6 +747,7 @@ Running test: testScopesPaused
         }
         scopeChain : [
             [0] : {
+                empty : true
                 endLocation : {
                     columnNumber : 2
                     lineNumber : 11
@@ -901,6 +909,7 @@ Running test: testScopesPaused
         }
         scopeChain : [
             [0] : {
+                empty : true
                 endLocation : {
                     columnNumber : 3
                     lineNumber : 9
@@ -962,8 +971,8 @@ Running test: testScopesPaused
         callFrameId : <callFrameId>
         canBeRestarted : true
         functionLocation : {
-            columnNumber : 2
-            lineNumber : 11
+            columnNumber : 4
+            lineNumber : 12
             scriptId : <scriptId>
         }
         functionName : <instance_members_initializer>
@@ -974,9 +983,10 @@ Running test: testScopesPaused
         }
         scopeChain : [
             [0] : {
+                empty : true
                 endLocation : {
-                    columnNumber : 3
-                    lineNumber : 15
+                    columnNumber : 13
+                    lineNumber : 14
                     scriptId : <scriptId>
                 }
                 name : <instance_members_initializer>
@@ -987,8 +997,8 @@ Running test: testScopesPaused
                     type : object
                 }
                 startLocation : {
-                    columnNumber : 2
-                    lineNumber : 11
+                    columnNumber : 4
+                    lineNumber : 12
                     scriptId : <scriptId>
                 }
                 type : local
@@ -1047,6 +1057,7 @@ Running test: testScopesPaused
         }
         scopeChain : [
             [0] : {
+                empty : true
                 endLocation : {
                     columnNumber : 2
                     lineNumber : 11

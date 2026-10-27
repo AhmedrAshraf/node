@@ -1,21 +1,18 @@
-let importedESM = 0;
-let importedCJS = 0;
-global.getModuleTypeStats = () => { return {importedESM, importedCJS} };
+import * as fixtures from '../../common/fixtures.mjs';
+import { register } from 'node:module';
 
-export async function load(url, context, next) {
-  return next(url);
+const sab = new SharedArrayBuffer(2);
+const data = new Uint8Array(sab);
+
+const ESM_MODULE_INDEX = 0
+const CJS_MODULE_INDEX = 1
+
+export function getModuleTypeStats() {
+  const importedESM = Atomics.load(data, ESM_MODULE_INDEX);
+  const importedCJS = Atomics.load(data, CJS_MODULE_INDEX);
+  return { importedESM, importedCJS };
 }
 
-export async function resolve(specifier, context, next) {
-  const nextResult = await next(specifier, context);
-  const { format } = nextResult;
-
-  if (format === 'module' || specifier.endsWith('.mjs')) {
-    importedESM++;
-  } else if (format == null || format === 'commonjs') {
-    importedCJS++;
-  }
-
-  return nextResult;
-}
-
+register(fixtures.fileURL('es-module-loaders/hook-resolve-type-loader.mjs'), {
+  data: { sab, ESM_MODULE_INDEX, CJS_MODULE_INDEX },
+});

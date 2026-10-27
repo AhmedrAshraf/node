@@ -24,12 +24,20 @@
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 #include "nghttp2_extpri.h"
+#include "nghttp2_http.h"
 
 uint8_t nghttp2_extpri_to_uint8(const nghttp2_extpri *extpri) {
   return (uint8_t)((uint32_t)extpri->inc << 7 | extpri->urgency);
 }
 
 void nghttp2_extpri_from_uint8(nghttp2_extpri *extpri, uint8_t u8extpri) {
-  extpri->urgency = nghttp2_extpri_uint8_urgency(u8extpri);
-  extpri->inc = nghttp2_extpri_uint8_inc(u8extpri);
+  *extpri = (nghttp2_extpri){
+    .urgency = nghttp2_extpri_uint8_urgency(u8extpri),
+    .inc = nghttp2_extpri_uint8_inc(u8extpri),
+  };
+}
+
+int nghttp2_extpri_parse_priority(nghttp2_extpri *extpri, const uint8_t *value,
+                                  size_t len) {
+  return nghttp2_http_parse_priority(extpri, value, len);
 }

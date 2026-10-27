@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -16,15 +16,20 @@
 #include <openssl/x509v3.h>
 #include "crypto/asn1.h"
 #include "crypto/x509.h"
+#include "crypto/evp.h"
+
+void OSSL_STACK_OF_X509_free(STACK_OF(X509) *certs)
+{
+    sk_X509_pop_free(certs, X509_free);
+}
 
 #ifndef OPENSSL_NO_STDIO
-int X509_print_fp(FILE *fp, X509 *x)
+int X509_print_fp(FILE *fp, const X509 *x)
 {
     return X509_print_ex_fp(fp, x, XN_FLAG_COMPAT, X509_FLAG_COMPAT);
 }
 
-int X509_print_ex_fp(FILE *fp, X509 *x, unsigned long nmflag,
-                     unsigned long cflag)
+int X509_print_ex_fp(FILE *fp, const X509 *x, unsigned long nmflag, unsigned long cflag)
 {
     BIO *b;
     int ret;
@@ -40,30 +45,26 @@ int X509_print_ex_fp(FILE *fp, X509 *x, unsigned long nmflag,
 }
 #endif
 
-int X509_print(BIO *bp, X509 *x)
+int X509_print(BIO *bp, const X509 *x)
 {
     return X509_print_ex(bp, x, XN_FLAG_COMPAT, X509_FLAG_COMPAT);
 }
 
-int X509_print_ex(BIO *bp, X509 *x, unsigned long nmflags,
-                  unsigned long cflag)
+int X509_print_ex(BIO *bp, const X509 *x, unsigned long nmflags, unsigned long cflag)
 {
     long l;
-    int ret = 0, i;
-    char *m = NULL, mlch = ' ';
+    int ret = 0;
+    char mlch = ' ';
     int nmindent = 0, printok = 0;
     EVP_PKEY *pkey = NULL;
-    const char *neg;
 
     if ((nmflags & XN_FLAG_SEP_MASK) == XN_FLAG_SEP_MULTILINE) {
         mlch = '\n';
         nmindent = 12;
     }
 
-    if (nmflags == X509_FLAG_COMPAT) {
-        nmindent = 16;
+    if (nmflags == XN_FLAG_COMPAT)
         printok = 1;
-    }
 
     if (!(cflag & X509_FLAG_NO_HEADER)) {
         if (BIO_write(bp, "Certificate:\n", 13) <= 0)
@@ -86,37 +87,10 @@ int X509_print_ex(BIO *bp, X509 *x, unsigned long nmflags,
 
         if (BIO_write(bp, "        Serial Number:", 22) <= 0)
             goto err;
-
-        if (bs->length <= (int)sizeof(long)) {
-                ERR_set_mark();
-                l = ASN1_INTEGER_get(bs);
-                ERR_pop_to_mark();
-        } else {
-            l = -1;
-        }
-        if (l != -1) {
-            unsigned long ul;
-            if (bs->type == V_ASN1_NEG_INTEGER) {
-                ul = 0 - (unsigned long)l;
-                neg = "-";
-            } else {
-                ul = l;
-                neg = "";
-            }
-            if (BIO_printf(bp, " %s%lu (%s0x%lx)\n", neg, ul, neg, ul) <= 0)
-                goto err;
-        } else {
-            neg = (bs->type == V_ASN1_NEG_INTEGER) ? " (Negative)" : "";
-            if (BIO_printf(bp, "\n%12s%s", "", neg) <= 0)
-                goto err;
-
-            for (i = 0; i < bs->length; i++) {
-                if (BIO_printf(bp, "%02x%c", bs->data[i],
-                               ((i + 1 == bs->length) ? '\n' : ':')) <= 0)
-                    goto err;
-            }
-        }
-
+        if (ossl_serial_number_print(bp, bs, 12) != 0)
+            goto err;
+        if (BIO_puts(bp, "\n") <= 0)
+            goto err;
     }
 
     if (!(cflag & X509_FLAG_NO_SIGNAME)) {
@@ -154,14 +128,13 @@ int X509_print_ex(BIO *bp, X509 *x, unsigned long nmflags,
     if (!(cflag & X509_FLAG_NO_SUBJECT)) {
         if (BIO_printf(bp, "        Subject:%c", mlch) <= 0)
             goto err;
-        if (X509_NAME_print_ex
-            (bp, X509_get_subject_name(x), nmindent, nmflags) < printok)
+        if (X509_NAME_print_ex(bp, X509_get_subject_name(x), nmindent, nmflags) < printok)
             goto err;
         if (BIO_write(bp, "\n", 1) <= 0)
             goto err;
     }
     if (!(cflag & X509_FLAG_NO_PUBKEY)) {
-        X509_PUBKEY *xpkey = X509_get_X509_PUBKEY(x);
+        const X509_PUBKEY *xpkey = X509_get_X509_PUBKEY(x);
         ASN1_OBJECT *xpoid;
         X509_PUBKEY_get0_param(&xpoid, NULL, NULL, NULL, xpkey);
         if (BIO_write(bp, "        Subject Public Key Info:\n", 33) <= 0)
@@ -201,7 +174,7 @@ int X509_print_ex(BIO *bp, X509 *x, unsigned long nmflags,
 
     if (!(cflag & X509_FLAG_NO_EXTENSIONS)
         && !X509V3_extensions_print(bp, "X509v3 extensions",
-                                    X509_get0_extensions(x), cflag, 8))
+            X509_get0_extensions(x), cflag, 8))
         goto err;
 
     if (!(cflag & X509_FLAG_NO_SIGDUMP)) {
@@ -216,19 +189,18 @@ int X509_print_ex(BIO *bp, X509 *x, unsigned long nmflags,
             goto err;
     }
     ret = 1;
- err:
-    OPENSSL_free(m);
+err:
     return ret;
 }
 
-int X509_ocspid_print(BIO *bp, X509 *x)
+int X509_ocspid_print(BIO *bp, const X509 *x)
 {
     unsigned char *der = NULL;
     unsigned char *dertmp;
     int derlen;
     int i;
     unsigned char SHA1md[SHA_DIGEST_LENGTH];
-    ASN1_BIT_STRING *keybstr;
+    const ASN1_BIT_STRING *keybstr;
     const X509_NAME *subj;
     EVP_MD *md = NULL;
 
@@ -245,7 +217,8 @@ int X509_ocspid_print(BIO *bp, X509 *x)
         goto err;
     if ((der = dertmp = OPENSSL_malloc(derlen)) == NULL)
         goto err;
-    i2d_X509_NAME(subj, &dertmp);
+    if (i2d_X509_NAME(subj, &dertmp) < 0)
+        goto err;
 
     md = EVP_MD_fetch(x->libctx, SN_sha1, x->propq);
     if (md == NULL)
@@ -271,7 +244,7 @@ int X509_ocspid_print(BIO *bp, X509 *x)
         goto err;
 
     if (!EVP_Digest(ASN1_STRING_get0_data(keybstr),
-                    ASN1_STRING_length(keybstr), SHA1md, NULL, md, NULL))
+            ASN1_STRING_get_length(keybstr), SHA1md, NULL, md, NULL))
         goto err;
     for (i = 0; i < SHA_DIGEST_LENGTH; i++) {
         if (BIO_printf(bp, "%02X", SHA1md[i]) <= 0)
@@ -281,7 +254,7 @@ int X509_ocspid_print(BIO *bp, X509 *x)
     EVP_MD_free(md);
 
     return 1;
- err:
+err:
     OPENSSL_free(der);
     EVP_MD_free(md);
     return 0;
@@ -295,7 +268,7 @@ int X509_signature_dump(BIO *bp, const ASN1_STRING *sig, int indent)
     n = sig->length;
     s = sig->data;
     for (i = 0; i < n; i++) {
-        if ((i % 18) == 0) {
+        if ((i % 24) == 0) {
             if (i > 0 && BIO_write(bp, "\n", 1) <= 0)
                 return 0;
             if (BIO_indent(bp, indent, indent) <= 0)
@@ -311,9 +284,11 @@ int X509_signature_dump(BIO *bp, const ASN1_STRING *sig, int indent)
 }
 
 int X509_signature_print(BIO *bp, const X509_ALGOR *sigalg,
-                         const ASN1_STRING *sig)
+    const ASN1_STRING *sig)
 {
+#ifndef OPENSSL_NO_DEPRECATED_3_6
     int sig_nid;
+#endif
     int indent = 4;
     if (BIO_printf(bp, "%*sSignature Algorithm: ", indent, "") <= 0)
         return 0;
@@ -322,16 +297,18 @@ int X509_signature_print(BIO *bp, const X509_ALGOR *sigalg,
 
     if (sig && BIO_printf(bp, "\n%*sSignature Value:", indent, "") <= 0)
         return 0;
+#ifndef OPENSSL_NO_DEPRECATED_3_6
     sig_nid = OBJ_obj2nid(sigalg->algorithm);
     if (sig_nid != NID_undef) {
         int pkey_nid, dig_nid;
         const EVP_PKEY_ASN1_METHOD *ameth;
         if (OBJ_find_sigid_algs(sig_nid, &dig_nid, &pkey_nid)) {
-            ameth = EVP_PKEY_asn1_find(NULL, pkey_nid);
+            ameth = evp_pkey_asn1_find(pkey_nid);
             if (ameth && ameth->sig_print)
                 return ameth->sig_print(bp, sigalg, sig, indent + 4, 0);
         }
     }
+#endif
     if (BIO_write(bp, "\n", 1) != 1)
         return 0;
     if (sig)
@@ -339,10 +316,10 @@ int X509_signature_print(BIO *bp, const X509_ALGOR *sigalg,
     return 1;
 }
 
-int X509_aux_print(BIO *out, X509 *x, int indent)
+int X509_aux_print(BIO *out, const X509 *x, int indent)
 {
     char oidstr[80], first;
-    STACK_OF(ASN1_OBJECT) *trust, *reject;
+    const STACK_OF(ASN1_OBJECT) *trust, *reject;
     const unsigned char *alias, *keyid;
     int keyidlen;
     int i;
@@ -359,7 +336,7 @@ int X509_aux_print(BIO *out, X509 *x, int indent)
             else
                 first = 0;
             OBJ_obj2txt(oidstr, sizeof(oidstr),
-                        sk_ASN1_OBJECT_value(trust, i), 0);
+                sk_ASN1_OBJECT_value(trust, i), 0);
             BIO_puts(out, oidstr);
         }
         BIO_puts(out, "\n");
@@ -374,7 +351,7 @@ int X509_aux_print(BIO *out, X509 *x, int indent)
             else
                 first = 0;
             OBJ_obj2txt(oidstr, sizeof(oidstr),
-                        sk_ASN1_OBJECT_value(reject, i), 0);
+                sk_ASN1_OBJECT_value(reject, i), 0);
             BIO_puts(out, oidstr);
         }
         BIO_puts(out, "\n");
@@ -397,35 +374,45 @@ int X509_aux_print(BIO *out, X509 *x, int indent)
  * Helper functions for improving certificate verification error diagnostics
  */
 
-int ossl_x509_print_ex_brief(BIO *bio, X509 *cert, unsigned long neg_cflags)
+int ossl_x509_print_ex_brief(BIO *bio, const X509 *cert, unsigned long neg_cflags)
 {
-    unsigned long flags = ASN1_STRFLGS_RFC2253 | ASN1_STRFLGS_ESC_QUOTE |
-        XN_FLAG_SEP_CPLUS_SPC | XN_FLAG_FN_SN;
+    unsigned long flags = ASN1_STRFLGS_RFC2253 | ASN1_STRFLGS_ESC_QUOTE | XN_FLAG_SEP_CPLUS_SPC | XN_FLAG_FN_SN;
+    X509_VERIFY_PARAM *vpm = X509_VERIFY_PARAM_new();
+    int error, ret = 0;
 
-    if (cert == NULL)
-        return BIO_printf(bio, "    (no certificate)\n") > 0;
+    if (vpm == NULL) {
+        ret = BIO_printf(bio, "    (malloc failed)\n") > 0;
+        goto err;
+    }
+    if (cert == NULL) {
+        ret = BIO_printf(bio, "    (no certificate)\n") > 0;
+        goto err;
+    }
     if (BIO_printf(bio, "    certificate\n") <= 0
-            || !X509_print_ex(bio, cert, flags, ~X509_FLAG_NO_SUBJECT))
-        return 0;
-    if (X509_check_issued((X509 *)cert, cert) == X509_V_OK) {
+        || !X509_print_ex(bio, cert, flags, ~X509_FLAG_NO_SUBJECT))
+        goto err;
+    if (X509_check_issued(cert, cert) == X509_V_OK) {
         if (BIO_printf(bio, "        self-issued\n") <= 0)
-            return 0;
+            goto err;
     } else {
         if (BIO_printf(bio, " ") <= 0
             || !X509_print_ex(bio, cert, flags, ~X509_FLAG_NO_ISSUER))
-            return 0;
+            goto err;
     }
     if (!X509_print_ex(bio, cert, flags,
-                       ~(X509_FLAG_NO_SERIAL | X509_FLAG_NO_VALIDITY)))
-        return 0;
-    if (X509_cmp_current_time(X509_get0_notBefore(cert)) > 0)
-        if (BIO_printf(bio, "        not yet valid\n") <= 0)
-            return 0;
-    if (X509_cmp_current_time(X509_get0_notAfter(cert)) < 0)
-        if (BIO_printf(bio, "        no more valid\n") <= 0)
-            return 0;
-    return X509_print_ex(bio, cert, flags,
-                         ~neg_cflags & ~X509_FLAG_EXTENSIONS_ONLY_KID);
+            ~(X509_FLAG_NO_SERIAL | X509_FLAG_NO_VALIDITY)))
+        goto err;
+
+    if (!X509_check_certificate_times(vpm, cert, &error)) {
+        if (BIO_printf(bio, "        %s\n", X509_verify_cert_error_string(error)) <= 0)
+            goto err;
+    }
+    ret = X509_print_ex(bio, cert, flags,
+        ~neg_cflags & ~X509_FLAG_EXTENSIONS_ONLY_KID);
+
+err:
+    X509_VERIFY_PARAM_free(vpm);
+    return ret;
 }
 
 static int print_certs(BIO *bio, const STACK_OF(X509) *certs)
@@ -442,10 +429,10 @@ static int print_certs(BIO *bio, const STACK_OF(X509) *certs)
             if (!ossl_x509_print_ex_brief(bio, cert, 0))
                 return 0;
             if (!X509V3_extensions_print(bio, NULL,
-                                         X509_get0_extensions(cert),
-                                         X509_FLAG_EXTENSIONS_ONLY_KID, 8))
+                    X509_get0_extensions(cert),
+                    X509_FLAG_EXTENSIONS_ONLY_KID, 8))
                 return 0;
-            }
+        }
     }
     return 1;
 }
@@ -456,7 +443,7 @@ static int print_store_certs(BIO *bio, X509_STORE *store)
         STACK_OF(X509) *certs = X509_STORE_get1_all_certs(store);
         int ret = print_certs(bio, certs);
 
-        sk_X509_pop_free(certs, X509_free);
+        OSSL_STACK_OF_X509_free(certs);
         return ret;
     } else {
         return BIO_printf(bio, "    (no trusted store)\n") >= 0;
@@ -470,12 +457,14 @@ int X509_STORE_CTX_print_verify_cb(int ok, X509_STORE_CTX *ctx)
         int cert_error = X509_STORE_CTX_get_error(ctx);
         BIO *bio = BIO_new(BIO_s_mem()); /* may be NULL */
 
+        if (bio == NULL)
+            return 0;
         BIO_printf(bio, "%s at depth = %d error = %d (%s)\n",
-                   X509_STORE_CTX_get0_parent_ctx(ctx) != NULL
-                   ? "CRL path validation"
-                   : "Certificate verification",
-                   X509_STORE_CTX_get_error_depth(ctx),
-                   cert_error, X509_verify_cert_error_string(cert_error));
+            X509_STORE_CTX_get0_parent_ctx(ctx) != NULL
+                ? "CRL path validation"
+                : "Certificate verification",
+            X509_STORE_CTX_get_error_depth(ctx),
+            cert_error, X509_verify_cert_error_string(cert_error));
         {
             X509_STORE *ts = X509_STORE_CTX_get0_store(ctx);
             X509_VERIFY_PARAM *vpm = X509_STORE_get0_param(ts);
@@ -507,14 +496,14 @@ int X509_STORE_CTX_print_verify_cb(int ok, X509_STORE_CTX *ctx)
 
         BIO_printf(bio, "Failure for:\n");
         ossl_x509_print_ex_brief(bio, X509_STORE_CTX_get_current_cert(ctx),
-                                 X509_FLAG_NO_EXTENSIONS);
+            X509_FLAG_NO_EXTENSIONS);
         if (cert_error == X509_V_ERR_CERT_UNTRUSTED
-                || cert_error == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT
-                || cert_error == X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN
-                || cert_error == X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT
-                || cert_error == X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY
-                || cert_error == X509_V_ERR_UNABLE_TO_GET_CRL_ISSUER
-                || cert_error == X509_V_ERR_STORE_LOOKUP) {
+            || cert_error == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT
+            || cert_error == X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN
+            || cert_error == X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT
+            || cert_error == X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY
+            || cert_error == X509_V_ERR_UNABLE_TO_GET_CRL_ISSUER
+            || cert_error == X509_V_ERR_STORE_LOOKUP) {
             BIO_printf(bio, "Non-trusted certs:\n");
             print_certs(bio, X509_STORE_CTX_get0_untrusted(ctx));
             BIO_printf(bio, "Certs in trust store:\n");
@@ -526,4 +515,50 @@ int X509_STORE_CTX_print_verify_cb(int ok, X509_STORE_CTX *ctx)
     }
 
     return ok;
+}
+
+/*
+ * Prints serial numbers in decimal and hexadecimal. The indent argument is only
+ * used if the serial number is too large to fit in an int64_t.
+ */
+int ossl_serial_number_print(BIO *out, const ASN1_INTEGER *bs, int indent)
+{
+    int i, ok;
+    int64_t l;
+    uint64_t ul;
+    const char *neg;
+
+    if (bs->length == 0) {
+        if (BIO_puts(out, " (Empty)") <= 0)
+            return -1;
+        return 0;
+    }
+
+    ERR_set_mark();
+    ok = ASN1_INTEGER_get_int64(&l, bs);
+    ERR_pop_to_mark();
+
+    if (ok) { /* Reading an int64_t succeeded: print decimal and hex. */
+        if (bs->type == V_ASN1_NEG_INTEGER) {
+            ul = 0 - (uint64_t)l;
+            neg = "-";
+        } else {
+            ul = l;
+            neg = "";
+        }
+        if (BIO_printf(out, " %s%ju (%s0x%jx)", neg, ul, neg, ul) <= 0)
+            return -1;
+    } else { /* Reading an int64_t failed: just print hex. */
+        neg = (bs->type == V_ASN1_NEG_INTEGER) ? " (Negative)" : "";
+        if (BIO_printf(out, "\n%*s%s", indent, "", neg) <= 0)
+            return -1;
+
+        for (i = 0; i < bs->length - 1; i++) {
+            if (BIO_printf(out, "%02x%c", bs->data[i], ':') <= 0)
+                return -1;
+        }
+        if (BIO_printf(out, "%02x", bs->data[i]) <= 0)
+            return -1;
+    }
+    return 0;
 }

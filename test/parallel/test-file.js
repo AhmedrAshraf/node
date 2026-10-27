@@ -146,10 +146,37 @@ const { inspect } = require('util');
 
 {
   const getter = Object.getOwnPropertyDescriptor(File.prototype, 'name').get;
-  assert.throws(
-    () => getter.call(undefined), // eslint-disable-line no-useless-call
-    {
-      code: 'ERR_INVALID_THIS',
-    }
-  );
+
+  [
+    undefined,
+    null,
+    true,
+  ].forEach((invalidThis) => {
+    assert.throws(
+      () => getter.call(invalidThis),
+      TypeError
+    );
+  });
 }
+
+(async () => {
+  // File should be cloneable via structuredClone.
+  // Refs: https://github.com/nodejs/node/issues/47612
+
+  const body = ['hello, ', 'world'];
+  const lastModified = Date.now() - 10_000;
+  const name = 'hello_world.txt';
+
+  const file = new File(body, name, { lastModified });
+  const clonedFile = structuredClone(file);
+
+  assert.deepStrictEqual(await clonedFile.text(), await file.text());
+  assert.deepStrictEqual(clonedFile.lastModified, file.lastModified);
+  assert.deepStrictEqual(clonedFile.name, file.name);
+
+  const clonedFile2 = structuredClone(clonedFile);
+
+  assert.deepStrictEqual(await clonedFile2.text(), await clonedFile.text());
+  assert.deepStrictEqual(clonedFile2.lastModified, clonedFile.lastModified);
+  assert.deepStrictEqual(clonedFile2.name, clonedFile.name);
+})().then(common.mustCall());

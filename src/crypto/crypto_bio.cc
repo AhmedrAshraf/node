@@ -30,10 +30,13 @@
 #include <cstring>
 
 namespace node {
+
+using ncrypto::BIOPointer;
+
 namespace crypto {
 
 BIOPointer NodeBIO::New(Environment* env) {
-  BIOPointer bio(BIO_new(GetMethod()));
+  auto bio = BIOPointer::New(GetMethod());
   if (bio && env != nullptr)
     NodeBIO::FromBIO(bio.get())->env_ = env;
   return bio;
@@ -43,9 +46,9 @@ BIOPointer NodeBIO::New(Environment* env) {
 BIOPointer NodeBIO::NewFixed(const char* data, size_t len, Environment* env) {
   BIOPointer bio = New(env);
 
-  if (!bio ||
-      len > INT_MAX ||
-      BIO_write(bio.get(), data, len) != static_cast<int>(len) ||
+  if (!bio || len > INT_MAX ||
+      BIOPointer::Write(&bio, std::string_view(data, len)) !=
+          static_cast<int>(len) ||
       BIO_set_mem_eof_return(bio.get(), 0) != 1) {
     return BIOPointer();
   }
@@ -96,7 +99,7 @@ int NodeBIO::Read(BIO* bio, char* out, int len) {
 
 char* NodeBIO::Peek(size_t* size) {
   *size = read_head_->write_pos_ - read_head_->read_pos_;
-  return read_head_->data_ + read_head_->read_pos_;
+  return read_head_->data_.get() + read_head_->read_pos_;
 }
 
 
@@ -109,7 +112,7 @@ size_t NodeBIO::PeekMultiple(char** out, size_t* size, size_t* count) {
   for (i = 0; i < max; i++) {
     size[i] = pos->write_pos_ - pos->read_pos_;
     total += size[i];
-    out[i] = pos->data_ + pos->read_pos_;
+    out[i] = pos->data_.get() + pos->read_pos_;
 
     /* Don't get past write head */
     if (pos == write_head_)
@@ -190,12 +193,9 @@ long NodeBIO::Ctrl(BIO* bio, int cmd, long num,  // NOLINT(runtime/int)
         *reinterpret_cast<void**>(ptr) = nullptr;
       break;
     case BIO_C_SET_BUF_MEM:
-      CHECK(0 && "Can't use SET_BUF_MEM_PTR with NodeBIO");
-      break;
+      UNREACHABLE("Can't use SET_BUF_MEM_PTR with NodeBIO");
     case BIO_C_GET_BUF_MEM_PTR:
-      CHECK(0 && "Can't use GET_BUF_MEM_PTR with NodeBIO");
-      ret = 0;
-      break;
+      UNREACHABLE("Can't use GET_BUF_MEM_PTR with NodeBIO");
     case BIO_CTRL_GET_CLOSE:
       ret = BIO_get_shutdown(bio);
       break;
@@ -223,12 +223,10 @@ long NodeBIO::Ctrl(BIO* bio, int cmd, long num,  // NOLINT(runtime/int)
 
 
 const BIO_METHOD* NodeBIO::GetMethod() {
-  // This is called from InitCryptoOnce() to avoid race conditions during
-  // initialization.
-  static BIO_METHOD* method = nullptr;
-
-  if (method == nullptr) {
-    method = BIO_meth_new(BIO_TYPE_MEM, "node.js SSL buffer");
+  // Static initialization ensures that this is safe to use concurrently.
+  static const BIO_METHOD* method = [&]() {
+    BIO_METHOD* method = BIO_meth_new(BIO_TYPE_MEM, "node.js SSL buffer");
+    CHECK_NOT_NULL(method);
     BIO_meth_set_write(method, Write);
     BIO_meth_set_read(method, Read);
     BIO_meth_set_puts(method, Puts);
@@ -236,7 +234,8 @@ const BIO_METHOD* NodeBIO::GetMethod() {
     BIO_meth_set_ctrl(method, Ctrl);
     BIO_meth_set_create(method, New);
     BIO_meth_set_destroy(method, Free);
-  }
+    return method;
+  }();
 
   return method;
 }
@@ -275,7 +274,8 @@ size_t NodeBIO::Read(char* out, size_t size) {
 
     // Copy data
     if (out != nullptr)
-      memcpy(out + offset, read_head_->data_ + read_head_->read_pos_, avail);
+      memcpy(
+          out + offset, read_head_->data_.get() + read_head_->read_pos_, avail);
     read_head_->read_pos_ += avail;
 
     // Move pointers
@@ -331,7 +331,7 @@ size_t NodeBIO::IndexOf(char delim, size_t limit) {
       avail = left;
 
     // Walk through data
-    char* tmp = current->data_ + current->read_pos_;
+    char* tmp = current->data_.get() + current->read_pos_;
     size_t off = 0;
     while (off < avail && *tmp != delim) {
       off++;
@@ -374,7 +374,7 @@ void NodeBIO::Write(const char* data, size_t size) {
       to_write = avail;
 
     // Copy data
-    memcpy(write_head_->data_ + write_head_->write_pos_,
+    memcpy(write_head_->data_.get() + write_head_->write_pos_,
            data + offset,
            to_write);
 
@@ -407,7 +407,7 @@ char* NodeBIO::PeekWritable(size_t* size) {
   if (*size == 0 || available <= *size)
     *size = available;
 
-  return write_head_->data_ + write_head_->write_pos_;
+  return write_head_->data_.get() + write_head_->write_pos_;
 }
 
 

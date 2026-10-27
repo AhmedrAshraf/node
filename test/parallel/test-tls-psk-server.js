@@ -1,10 +1,15 @@
 'use strict';
 const common = require('../common');
 
-if (!common.hasCrypto)
+if (!common.hasCrypto) {
   common.skip('missing crypto');
-if (!common.opensslCli)
+}
+
+const { isBoringSSL, opensslCli } = require('../common/crypto');
+
+if (!opensslCli) {
   common.skip('missing openssl cli');
+}
 
 const assert = require('assert');
 
@@ -17,13 +22,15 @@ const IDENTITY = 'TestUser';
 
 const server = tls.createServer({
   ciphers: CIPHERS,
+  // BoringSSL requires TLS 1.2 for this certificate-less PSK handshake.
+  ...(isBoringSSL ? { maxVersion: 'TLSv1.2' } : {}),
   pskIdentityHint: IDENTITY,
-  pskCallback(socket, identity) {
+  pskCallback: common.mustCall((socket, identity) => {
     assert.ok(socket instanceof tls.TLSSocket);
     assert.ok(typeof identity === 'string');
     if (identity === IDENTITY)
       return Buffer.from(KEY, 'hex');
-  }
+  }),
 });
 
 server.on('connection', common.mustCall());
@@ -40,8 +47,8 @@ let gotHello = false;
 let sentWorld = false;
 let gotWorld = false;
 
-server.listen(0, () => {
-  const client = spawn(common.opensslCli, [
+server.listen(0, common.mustCall(() => {
+  const client = spawn(opensslCli, [
     's_client',
     '-connect', `127.0.0.1:${server.address().port}`,
     '-cipher', CIPHERS,
@@ -74,4 +81,4 @@ server.listen(0, () => {
     assert.strictEqual(code, 0);
     server.close();
   }));
-});
+}));

@@ -27,6 +27,48 @@
 #include <assert.h>
 #include <string.h>
 
+nghttp2_data_provider_wrap *
+nghttp2_data_provider_wrap_v1(nghttp2_data_provider_wrap *dpw,
+                              const nghttp2_data_provider *data_prd) {
+  if (!data_prd) {
+    return NULL;
+  }
+
+  *dpw = (nghttp2_data_provider_wrap){
+    .version = NGHTTP2_DATA_PROVIDER_V1,
+    .data_prd.v1 = *data_prd,
+  };
+
+  return dpw;
+}
+
+nghttp2_data_provider_wrap *
+nghttp2_data_provider_wrap_v2(nghttp2_data_provider_wrap *dpw,
+                              const nghttp2_data_provider2 *data_prd) {
+  if (!data_prd) {
+    return NULL;
+  }
+
+  *dpw = (nghttp2_data_provider_wrap){
+    .version = NGHTTP2_DATA_PROVIDER_V2,
+    .data_prd.v2 = *data_prd,
+  };
+
+  return dpw;
+}
+
+int nghttp2_data_provider_wrap_contains_read_callback(
+  const nghttp2_data_provider_wrap *dpw) {
+  switch (dpw->version) {
+  case NGHTTP2_DATA_PROVIDER_V1:
+    return dpw->data_prd.v1.read_callback != NULL;
+  case NGHTTP2_DATA_PROVIDER_V2:
+    return dpw->data_prd.v2.read_callback != NULL;
+  default:
+    return 0;
+  }
+}
+
 void nghttp2_outbound_item_init(nghttp2_outbound_item *item) {
   item->cycle = 0;
   item->qnext = NULL;
@@ -101,8 +143,7 @@ void nghttp2_outbound_item_free(nghttp2_outbound_item *item, nghttp2_mem *mem) {
 }
 
 void nghttp2_outbound_queue_init(nghttp2_outbound_queue *q) {
-  q->head = q->tail = NULL;
-  q->n = 0;
+  *q = (nghttp2_outbound_queue){0};
 }
 
 void nghttp2_outbound_queue_push(nghttp2_outbound_queue *q,

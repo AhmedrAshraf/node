@@ -1,150 +1,266 @@
 // Flags: --expose-internals
 
 import '../common/index.mjs';
-import { strictEqual } from 'node:assert';
+import assert from 'node:assert';
 import errorsModule from 'internal/errors';
 
 
 const { determineSpecificType } = errorsModule;
 
-strictEqual(
+assert.strictEqual(
   determineSpecificType(1n),
   'type bigint (1n)',
 );
 
-strictEqual(
+assert.strictEqual(
+  determineSpecificType(true),
+  'type boolean (true)',
+);
+assert.strictEqual(
   determineSpecificType(false),
   'type boolean (false)',
 );
 
-strictEqual(
+assert.strictEqual(
   determineSpecificType(2),
   'type number (2)',
 );
 
-strictEqual(
+assert.strictEqual(
   determineSpecificType(NaN),
   'type number (NaN)',
 );
 
-strictEqual(
+assert.strictEqual(
   determineSpecificType(Infinity),
   'type number (Infinity)',
 );
 
-strictEqual(
-  determineSpecificType(Object.create(null)),
+assert.strictEqual(
+  determineSpecificType({ __proto__: null }),
   '[Object: null prototype] {}',
 );
 
-strictEqual(
+assert.strictEqual(
   determineSpecificType(''),
   "type string ('')",
 );
 
-strictEqual(
+assert.strictEqual(
+  determineSpecificType(''),
+  "type string ('')",
+);
+assert.strictEqual(
+  determineSpecificType("''"),
+  "type string (\"''\")",
+);
+assert.strictEqual(
+  determineSpecificType('Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor'),
+  "type string ('Lorem ipsum dolor sit ame...')",
+);
+assert.strictEqual(
+  determineSpecificType("Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor'"),
+  "type string ('Lorem ipsum dolor sit ame...')",
+);
+assert.strictEqual(
+  determineSpecificType("Lorem' ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor"),
+  "type string (\"Lorem' ipsum dolor sit am...\")",
+);
+
+assert.strictEqual(
   determineSpecificType(Symbol('foo')),
   'type symbol (Symbol(foo))',
 );
 
-strictEqual(
+assert.strictEqual(
   determineSpecificType(function foo() {}),
   'function foo',
 );
 
-strictEqual(
+const implicitlyNamed = function() {}; // eslint-disable-line func-style
+assert.strictEqual(
+  determineSpecificType(implicitlyNamed),
+  'function implicitlyNamed',
+);
+assert.strictEqual(
+  determineSpecificType(() => {}),
+  'function ',
+);
+function noName() {}
+delete noName.name;
+assert.strictEqual(
+  noName.name,
+  '',
+);
+assert.strictEqual(
+  determineSpecificType(noName),
+  'function ',
+);
+
+function * generatorFn() {}
+assert.strictEqual(
+  determineSpecificType(generatorFn),
+  'function generatorFn',
+);
+
+async function asyncFn() {}
+assert.strictEqual(
+  determineSpecificType(asyncFn),
+  'function asyncFn',
+);
+
+assert.strictEqual(
   determineSpecificType(null),
   'null',
 );
 
-strictEqual(
+assert.strictEqual(
   determineSpecificType(undefined),
   'undefined',
 );
 
-strictEqual(
+assert.strictEqual(
   determineSpecificType([]),
   'an instance of Array',
 );
 
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new Array()),
   'an instance of Array',
 );
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new BigInt64Array()),
   'an instance of BigInt64Array',
 );
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new BigUint64Array()),
   'an instance of BigUint64Array',
 );
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new Int8Array()),
   'an instance of Int8Array',
 );
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new Int16Array()),
   'an instance of Int16Array',
 );
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new Int32Array()),
   'an instance of Int32Array',
 );
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new Float32Array()),
   'an instance of Float32Array',
 );
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new Float64Array()),
   'an instance of Float64Array',
 );
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new Uint8Array()),
   'an instance of Uint8Array',
 );
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new Uint8ClampedArray()),
   'an instance of Uint8ClampedArray',
 );
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new Uint16Array()),
   'an instance of Uint16Array',
 );
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new Uint32Array()),
   'an instance of Uint32Array',
 );
 
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new Date()),
   'an instance of Date',
 );
 
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new Map()),
   'an instance of Map',
 );
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new WeakMap()),
   'an instance of WeakMap',
 );
 
-strictEqual(
+assert.strictEqual(
   determineSpecificType({}),
   'an instance of Object',
 );
+assert.strictEqual(
+  determineSpecificType(new Object()),
+  'an instance of Object',
+);
 
-strictEqual(
+assert.strictEqual(
   determineSpecificType(Promise.resolve('foo')),
   'an instance of Promise',
 );
 
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new Set()),
   'an instance of Set',
 );
-strictEqual(
+assert.strictEqual(
   determineSpecificType(new WeakSet()),
   'an instance of WeakSet',
+);
+
+// Anonymous classes have an empty `name`, so the value is inspected instead.
+// `inspect(..., { depth: -1 })` prints this one as `{}` because it has no own
+// properties; the values below carry a `constructor` property of their own and
+// print as `[Object]`.
+assert.strictEqual(
+  determineSpecificType(new (class {})()),
+  '{}',
+);
+
+// `constructor` is an ordinary, user-controlled property that need not be a
+// function. Describing such a value must not throw.
+assert.strictEqual(
+  determineSpecificType(JSON.parse('{"constructor": 5}')),
+  '[Object]',
+);
+
+assert.strictEqual(
+  determineSpecificType({ constructor: { name: '' } }),
+  '[Object]',
+);
+
+// A `constructor.name` that is not a usable string must not be interpolated
+// into the message.
+assert.strictEqual(
+  determineSpecificType({ constructor: { name: Symbol('x') } }),
+  '[Object]',
+);
+
+assert.strictEqual(
+  determineSpecificType({ constructor: { name: 42 } }),
+  '[Object]',
+);
+
+// `constructor` and its `name` are each read once. Both may be accessors, so
+// repeated reads are observable, and a `name` validated by one read and
+// interpolated from another need not be the same value twice.
+let constructorReads = 0;
+let nameReads = 0;
+const named = {
+  get constructor() {
+    constructorReads++;
+    return { get name() { nameReads++; return 'Foo'; } };
+  },
+};
+assert.strictEqual(determineSpecificType(named), 'an instance of Foo');
+assert.strictEqual(constructorReads, 1);
+assert.strictEqual(nameReads, 1);
+
+// Building the error must not fail when `constructor` is a truthy primitive.
+assert.strictEqual(
+  new errorsModule.codes.ERR_INVALID_ARG_TYPE(
+    'arg', 'string', JSON.parse('{"constructor": 5}')).code,
+  'ERR_INVALID_ARG_TYPE',
 );

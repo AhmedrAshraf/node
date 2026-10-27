@@ -33,14 +33,14 @@ assert.throws(
   {
     code: 'ERR_INVALID_OBJECT_DEFINE_PROPERTY',
     name: 'TypeError',
-    message: '\'process.env\' does not accept an' +
+    message: '\'process.env\' does not accept an ' +
         'accessor(getter/setter) descriptor'
   }
 );
 
 const attributes = ['configurable', 'writable', 'enumerable'];
 
-attributes.forEach((attribute) => {
+for (const attribute of attributes) {
   assert.throws(
     () => {
       Object.defineProperty(process.env, 'goo', {
@@ -55,7 +55,7 @@ attributes.forEach((attribute) => {
           ' and enumerable data descriptor'
     }
   );
-});
+}
 
 assert.strictEqual(process.env.goo, undefined);
 Object.defineProperty(process.env, 'goo', {

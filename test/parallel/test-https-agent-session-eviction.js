@@ -2,22 +2,35 @@
 'use strict';
 
 const common = require('../common');
-const { readKey } = require('../common/fixtures');
 
-if (!common.hasCrypto)
+if (!common.hasCrypto) {
   common.skip('missing crypto');
+}
+
+const fixtures = require('../common/fixtures');
+const { hasOpenSSL, hasFIPS, isBoringSSL } = require('../common/crypto');
 
 const https = require('https');
-const { SSL_OP_NO_TICKET } = require('crypto').constants;
+const { constants: { SSL_OP_NO_TICKET } } = require('crypto');
+const fips3 = hasFIPS(3);
 
 const options = {
-  key: readKey('agent1-key.pem'),
-  cert: readKey('agent1-cert.pem'),
+  key: fixtures.readKey('agent1-key.pem'),
+  cert: fixtures.readKey('agent1-cert.pem'),
   secureOptions: SSL_OP_NO_TICKET,
-  ciphers: 'RSA@SECLEVEL=0'
 };
 
-// Create TLS1.2 server
+if (fips3) {
+  options.minVersion = 'TLSv1.3';
+  options.maxVersion = 'TLSv1.3';
+}
+
+if (!isBoringSSL) {
+  options.ciphers = fips3 ?
+    'ECDHE-RSA-AES256-GCM-SHA384' : 'RSA@SECLEVEL=0';
+}
+
+// Create the initial server and cache a session from it.
 https.createServer(options, function(req, res) {
   res.writeHead(200, { 'Connection': 'close' });
   res.end('ohai');
@@ -41,9 +54,14 @@ function first(server) {
   req.end();
 }
 
-// Create TLS1 server
+// Create a server constrained to a different TLS version.
 function faultyServer(port) {
-  options.secureProtocol = 'TLSv1_method';
+  if (fips3) {
+    options.minVersion = 'TLSv1.2';
+    options.maxVersion = 'TLSv1.2';
+  } else {
+    options.secureProtocol = 'TLSv1_method';
+  }
   https.createServer(options, function(req, res) {
     res.writeHead(200, { 'Connection': 'close' });
     res.end('hello faulty');
@@ -56,15 +74,17 @@ function faultyServer(port) {
 function second(server, session) {
   const req = https.request({
     port: server.address().port,
+    ciphers: fips3 ? 'ECDHE-RSA-AES256-GCM-SHA384' :
+      (hasOpenSSL(3, 1) ? 'DEFAULT:@SECLEVEL=0' : 'DEFAULT'),
     rejectUnauthorized: false
   }, function(res) {
     res.resume();
   });
 
-  // Although we have a TLS 1.2 session to offer to the TLS 1.0 server,
-  // connection to the TLS 1.0 server should work.
+  // Offering the cached session to a server using another TLS version should
+  // not prevent a fresh connection.
   req.on('response', common.mustCall(function(res) {
-    // The test is now complete for OpenSSL 1.1.0.
+    // The test is now complete.
     server.close();
   }));
 

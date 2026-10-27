@@ -6,15 +6,21 @@ if (!common.hasCrypto)
 const assert = require('assert');
 const crypto = require('crypto');
 const https = require('https');
+const { hasFIPS, isBoringSSL } = require('../common/crypto');
 const fixtures = require('../common/fixtures');
+const fips3 = hasFIPS(3);
 
 const options = {
   key: fixtures.readKey('agent1-key.pem'),
   cert: fixtures.readKey('agent1-cert.pem'),
   ca: fixtures.readKey('ca1-cert.pem'),
-  minVersion: 'TLSv1.1',
-  ciphers: 'ALL@SECLEVEL=0'
+  minVersion: fips3 ? 'TLSv1.2' : 'TLSv1.1',
 };
+
+if (!isBoringSSL) {
+  options.ciphers = fips3 ?
+    'ECDHE-RSA-AES256-GCM-SHA384' : 'ALL@SECLEVEL=0';
+}
 
 const server = https.Server(options, (req, res) => {
   res.writeHead(200);
@@ -22,24 +28,31 @@ const server = https.Server(options, (req, res) => {
 });
 
 function getBaseOptions(port) {
-  return {
+  const baseOptions = {
     path: '/',
     port: port,
     ca: options.ca,
     rejectUnauthorized: true,
     servername: 'agent1',
-    ciphers: 'ALL@SECLEVEL=0'
   };
+
+  if (!isBoringSSL) {
+    baseOptions.ciphers = fips3 ?
+      'ECDHE-RSA-AES256-GCM-SHA384' : 'ALL@SECLEVEL=0';
+  }
+
+  return baseOptions;
 }
 
 const updatedValues = new Map([
   ['dhparam', fixtures.readKey('dh2048.pem')],
   ['ecdhCurve', 'secp384r1'],
   ['honorCipherOrder', true],
-  ['minVersion', 'TLSv1.1'],
+  ['minVersion', fips3 ? 'TLSv1.2' : 'TLSv1.1'],
   ['maxVersion', 'TLSv1.3'],
   ['secureOptions', crypto.constants.SSL_OP_CIPHER_SERVER_PREFERENCE],
-  ['secureProtocol', 'TLSv1_1_method'],
+  ['secureProtocol', fips3 ?
+    'TLSv1_2_method' : 'TLSv1_1_method'],
   ['sessionIdContext', 'sessionIdContext'],
 ]);
 

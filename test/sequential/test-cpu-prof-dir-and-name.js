@@ -9,21 +9,21 @@ common.skipIfInspectorDisabled();
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawnSyncAndExitWithoutError } = require('../common/child_process');
 
 const tmpdir = require('../common/tmpdir');
 const {
   getCpuProfiles,
   kCpuProfInterval,
   env,
-  verifyFrames
+  verifyFrames,
 } = require('../common/cpu-prof');
 
 {
   tmpdir.refresh();
-  const dir = path.join(tmpdir.path, 'prof');
+  const dir = tmpdir.resolve('prof');
   const file = path.join(dir, 'test.cpuprofile');
-  const output = spawnSync(process.execPath, [
+  const { child: output } = spawnSyncAndExitWithoutError(process.execPath, [
     '--cpu-prof',
     '--cpu-prof-interval',
     kCpuProfInterval,
@@ -34,12 +34,8 @@ const {
     fixtures.path('workload', 'fibonacci.js'),
   ], {
     cwd: tmpdir.path,
-    env
+    env,
   });
-  if (output.status !== 0) {
-    console.log(output.stderr.toString());
-  }
-  assert.strictEqual(output.status, 0);
   assert(fs.existsSync(dir));
   const profiles = getCpuProfiles(dir);
   assert.deepStrictEqual(profiles, [file]);

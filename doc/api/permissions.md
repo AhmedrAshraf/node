@@ -1,446 +1,568 @@
 # Permissions
 
+<!--introduced_in=v20.0.0-->
+
 Permissions can be used to control what system resources the
 Node.js process has access to or what actions the process can take
-with those resources. Permissions can also control what modules can
-be accessed by other modules.
+with those resources.
 
-* [Module-based permissions](#module-based-permissions) control which files
-  or URLs are available to other modules during application execution.
-  This can be used to control what modules can be accessed by third-party
-  dependencies, for example.
+* [Process-based permissions](#process-based-permissions) control the Node.js
+  process's access to resources.
+  The resource can be entirely allowed or denied, or actions related to it can
+  be controlled. For example, file system reads can be allowed while denying
+  writes.
+  This feature does not protect against malicious code. According to the Node.js
+  [Security Policy][], Node.js trusts any code it is asked to run.
+
+The permission model implements a "seat belt" approach, which prevents trusted
+code from unintentionally changing files or using resources that access has
+not explicitly been granted to. It does not provide security guarantees in the
+presence of malicious code. Malicious code can bypass the permission model and
+execute arbitrary code without the restrictions imposed by the permission
+model.
 
 If you find a potential security vulnerability, please refer to our
 [Security Policy][].
 
-## Module-based permissions
+## Process-based permissions
 
-### Policies
+### Permission Model
 
-<!--introduced_in=v11.8.0-->
+<!-- YAML
+added: v20.0.0
+changes:
+  - version:
+    - v23.5.0
+    - v22.13.0
+    pr-url: https://github.com/nodejs/node/pull/56201
+    description: This feature is no longer experimental.
+-->
 
-<!-- type=misc -->
+> Stability: 2 - Stable
 
-> Stability: 1 - Experimental
+The Node.js Permission Model is a mechanism for restricting access to specific
+resources during execution.
+The API exists behind a flag [`--permission`][] which when enabled,
+will restrict access to all available permissions.
 
-<!-- name=policy -->
+The available permissions are documented by the [`--permission`][]
+flag.
 
-Node.js contains experimental support for creating policies on loading code.
+The Permission Model has two operational modes:
 
-Policies are a security feature intended to allow guarantees
-about what code Node.js is able to load. The use of policies assumes
-safe practices for the policy files such as ensuring that policy
-files cannot be overwritten by the Node.js application by using
-file permissions.
+* **Enforce mode** (default when using [`--permission`][]): Access is denied and
+  an `ERR_ACCESS_DENIED` error is thrown for any operation the process has not
+  been granted permission to perform.
+* **Audit mode** (when using [`--permission-audit`][]): Permission checks are
+  performed and violations are published through the diagnostics channel, but
+  access is **not** denied. Execution continues normally. This mode is useful
+  for discovering what permissions your application requires before deploying
+  with enforce mode.
 
-A best practice would be to ensure that the policy manifest is read-only for
-the running Node.js application and that the file cannot be changed
-by the running Node.js application in any way. A typical setup would be to
-create the policy file as a different user id than the one running Node.js
-and granting read permissions to the user id running Node.js.
+When starting Node.js with `--permission`,
+the ability to access the file system through the `fs` module, access the network,
+access environment variables, spawn processes, use `node:worker_threads`, use
+native addons, use WASI, use FFI, and enable the runtime inspector will be
+restricted (the listener for SIGUSR1 won't be created).
 
-#### Enabling
+```console
+$ node --permission index.js
 
-<!-- type=misc -->
-
-The `--experimental-policy` flag can be used to enable features for policies
-when loading modules.
-
-Once this has been set, all modules must conform to a policy manifest file
-passed to the flag:
-
-```bash
-node --experimental-policy=policy.json app.js
-```
-
-The policy manifest will be used to enforce constraints on code loaded by
-Node.js.
-
-To mitigate tampering with policy files on disk, an integrity for
-the policy file itself may be provided via `--policy-integrity`.
-This allows running `node` and asserting the policy file contents
-even if the file is changed on disk.
-
-```bash
-node --experimental-policy=policy.json --policy-integrity="sha384-SggXRQHwCG8g+DktYYzxkXRIkTiEYWBHqev0xnpCxYlqMBufKZHAHQM3/boDaI/0" app.js
-```
-
-#### Features
-
-##### Error behavior
-
-When a policy check fails, Node.js by default will throw an error.
-It is possible to change the error behavior to one of a few possibilities
-by defining an "onerror" field in a policy manifest. The following values are
-available to change the behavior:
-
-* `"exit"`: will exit the process immediately.
-  No cleanup code will be allowed to run.
-* `"log"`: will log the error at the site of the failure.
-* `"throw"`: will throw a JS error at the site of the failure. This is the
-  default.
-
-```json
-{
-  "onerror": "log",
-  "resources": {
-    "./app/checked.js": {
-      "integrity": "sha384-SggXRQHwCG8g+DktYYzxkXRIkTiEYWBHqev0xnpCxYlqMBufKZHAHQM3/boDaI/0"
-    }
-  }
+Error: Access to this API has been restricted
+    at node:internal/main/run_main_module:23:47 {
+  code: 'ERR_ACCESS_DENIED',
+  permission: 'FileSystemRead',
+  resource: '/home/user/index.js'
 }
 ```
 
-##### Integrity checks
+Allowing access to spawning a process and creating worker threads can be done
+using the [`--allow-child-process`][] and [`--allow-worker`][] respectively.
 
-Policy files must use integrity checks with Subresource Integrity strings
-compatible with the browser
-[integrity attribute](https://www.w3.org/TR/SRI/#the-integrity-attribute)
-associated with absolute URLs.
+To grant access to environment variables, use [`--allow-env`][].
 
-When using `require()` or `import` all resources involved in loading are checked
-for integrity if a policy manifest has been specified. If a resource does not
-match the integrity listed in the manifest, an error will be thrown.
+To allow network access, use [`--allow-net`][] and for allowing native addons
+when using permission model, use the [`--allow-addons`][]
+flag. For WASI, use the [`--allow-wasi`][] flag. For FFI, use the
+[`--allow-ffi`][] flag. The [`node:ffi`](ffi.md) module is only available in
+builds with FFI support.
 
-An example policy file that would allow loading a file `checked.js`:
+To allow use of OpenSSL STORE loaders, for example to load a private key
+from a {URL} passed to [`crypto.createPrivateKey()`][], use the
+[`--allow-openssl-store`][] flag.
+This flag grants broad authority to configured OpenSSL STORE loaders, which may
+access files, devices, tokens, or the network. Access performed by a loader is
+not constrained by the `fs.read`, `fs.write`, or `net` permission scopes.
 
-```json
-{
-  "resources": {
-    "./app/checked.js": {
-      "integrity": "sha384-SggXRQHwCG8g+DktYYzxkXRIkTiEYWBHqev0xnpCxYlqMBufKZHAHQM3/boDaI/0"
-    }
-  }
-}
-```
+Mounting a [virtual file system][] with [`vfs.mount()`][] throws
+`ERR_INVALID_STATE` unless the [`--allow-fs-vfs`][] flag is passed. A mounted
+VFS serves paths that the file system permissions do not describe, so it is not
+gated by [`--allow-fs-read`][] or [`--allow-fs-write`][].
 
-Each resource listed in the policy manifest can be of one the following
-formats to determine its location:
+#### Runtime API
 
-1. A [relative-URL string][] to a resource from the manifest such as `./resource.js`, `../resource.js`, or `/resource.js`.
-2. A complete URL string to a resource such as `file:///resource.js`.
+When enabling the Permission Model through the [`--permission`][]
+or [`--permission-audit`][] flags, a new property `permission` is added to the
+`process` object. This property contains the following functions:
 
-When loading resources the entire URL must match including search parameters
-and hash fragment. `./a.js?b` will not be used when attempting to load
-`./a.js` and vice versa.
+##### `permission.has(scope[, reference])`
 
-To generate integrity strings, a script such as
-`node -e 'process.stdout.write("sha256-");process.stdin.pipe(crypto.createHash("sha256").setEncoding("base64")).pipe(process.stdout)' < FILE`
-can be used.
-
-Integrity can be specified as the boolean value `true` to accept any
-body for the resource which can be useful for local development. It is not
-recommended in production since it would allow unexpected alteration of
-resources to be considered valid.
-
-##### Dependency redirection
-
-An application may need to ship patched versions of modules or to prevent
-modules from allowing all modules access to all other modules. Redirection
-can be used by intercepting attempts to load the modules wishing to be
-replaced.
-
-```json
-{
-  "resources": {
-    "./app/checked.js": {
-      "dependencies": {
-        "fs": true,
-        "os": "./app/node_modules/alt-os",
-        "http": { "import": true }
-      }
-    }
-  }
-}
-```
-
-The dependencies are keyed by the requested specifier string and have values
-of either `true`, `null`, a string pointing to a module to be resolved,
-or a conditions object.
-
-The specifier string does not perform any searching and must match exactly what
-is provided to the `require()` or `import` except for a canonicalization step.
-Therefore, multiple specifiers may be needed in the policy if it uses multiple
-different strings to point to the same module (such as excluding the extension).
-
-Specifier strings are canonicalized but not resolved prior to be used for
-matching in order to have some compatibility with import maps, for example if a
-resource `file:///C:/app/server.js` was given the following redirection from a
-policy located at `file:///C:/app/policy.json`:
-
-```json
-{
-  "resources": {
-    "file:///C:/app/utils.js": {
-      "dependencies": {
-        "./utils.js": "./utils-v2.js"
-      }
-    }
-  }
-}
-```
-
-Any specifier used to load `file:///C:/app/utils.js` would then be intercepted
-and redirected to `file:///C:/app/utils-v2.js` instead regardless of using an
-absolute or relative specifier. However, if a specifier that is not an absolute
-or relative URL string is used, it would not be intercepted. So, if an import
-such as `import('#utils')` was used, it would not be intercepted.
-
-If the value of the redirection is `true`, a "dependencies" field at the top of
-the policy file will be used. If that field at the top of the policy file is
-`true` the default node searching algorithms are used to find the module.
-
-If the value of the redirection is a string, it is resolved relative to
-the manifest and then immediately used without searching.
-
-Any specifier string for which resolution is attempted and that is not listed in
-the dependencies results in an error according to the policy.
-
-Redirection does not prevent access to APIs through means such as direct access
-to `require.cache` or through `module.constructor` which allow access to
-loading modules. Policy redirection only affects specifiers to `require()` and
-`import`. Other means, such as to prevent undesired access to APIs through
-variables, are necessary to lock down that path of loading modules.
-
-A boolean value of `true` for the dependencies map can be specified to allow a
-module to load any specifier without redirection. This can be useful for local
-development and may have some valid usage in production, but should be used
-only with care after auditing a module to ensure its behavior is valid.
-
-Similar to `"exports"` in `package.json`, dependencies can also be specified to
-be objects containing conditions which branch how dependencies are loaded. In
-the preceding example, `"http"` is allowed when the `"import"` condition is
-part of loading it.
-
-A value of `null` for the resolved value causes the resolution to fail. This
-can be used to ensure some kinds of dynamic access are explicitly prevented.
-
-Unknown values for the resolved module location cause failures but are
-not guaranteed to be forward compatible.
-
-##### Example: Patched dependency
-
-Redirected dependencies can provide attenuated or modified functionality as fits
-the application. For example, log data about timing of function durations by
-wrapping the original:
+API call to check permissions at runtime ([`permission.has()`][])
 
 ```js
-const original = require('fn');
-module.exports = function fn(...args) {
-  console.time();
-  try {
-    return new.target ?
-      Reflect.construct(original, args) :
-      Reflect.apply(original, this, args);
-  } finally {
-    console.timeEnd();
-  }
-};
+process.permission.has('fs.write'); // true
+process.permission.has('fs.write', '/home/rafaelgss/protected-folder'); // true
+
+process.permission.has('fs.read'); // true
+process.permission.has('fs.read', '/home/rafaelgss/protected-folder'); // false
 ```
 
-#### Scopes
+##### `permission.drop(scope[, reference])`
 
-Use the `"scopes"` field of a manifest to set configuration for many resources
-at once. The `"scopes"` field works by matching resources by their segments.
-If a scope or resource includes `"cascade": true`, unknown specifiers will
-be searched for in their containing scope. The containing scope for cascading
-is found by recursively reducing the resource URL by removing segments for
-[special schemes][], keeping trailing `"/"` suffixes, and removing the query and
-hash fragment. This leads to the eventual reduction of the URL to its origin.
-If the URL is non-special the scope will be located by the URL's origin. If no
-scope is found for the origin or in the case of opaque origins, a protocol
-string can be used as a scope. If no scope is found for the URL's protocol, a
-final empty string `""` scope will be used.
+API call to drop permissions at runtime. This operation is **irreversible**.
 
-Note, `blob:` URLs adopt their origin from the path they contain, and so a scope
-of `"blob:https://nodejs.org"` will have no effect since no URL can have an
-origin of `blob:https://nodejs.org`; URLs starting with
-`blob:https://nodejs.org/` will use `https://nodejs.org` for its origin and
-thus `https:` for its protocol scope. For opaque origin `blob:` URLs they will
-have `blob:` for their protocol scope since they do not adopt origins.
+When called without a reference, the entire scope is dropped. When called
+with a reference, only the permission for that specific resource is revoked.
+Dropping a permission only affects future access checks. It does not close or
+revoke access to resources that are already open, such as file descriptors,
+network sockets, child processes, or worker threads. Applications are
+responsible for closing or terminating those resources when they are no longer
+needed.
 
-##### Example
+You can only drop the exact resource that was explicitly granted. The
+reference passed to `drop()` must match the original grant. If a permission
+was granted using a wildcard (`*`), only the entire scope can be dropped
+(by calling `drop()` without a reference). If a directory was granted
+(e.g. `--allow-fs-read=/my/folder`), you cannot drop individual files
+inside it - you must drop the same directory that was originally granted.
+
+```js
+const fs = require('node:fs');
+
+// Read config at startup while we still have permission
+const config = fs.readFileSync('/etc/myapp/config.json', 'utf8');
+
+// Drop read access to /etc/myapp after initialization
+process.permission.drop('fs.read', '/etc/myapp');
+
+// This will now return false
+process.permission.has('fs.read', '/etc/myapp/config.json'); // false
+
+// Drop child process permission entirely
+process.permission.drop('child');
+```
+
+#### Audit Mode
+
+The [`--permission-audit`][] flag enables audit mode for the Permission Model.
+In audit mode, permission checks are performed but access is **not** denied —
+no `ERR_ACCESS_DENIED` error is thrown. Instead, each permission violation is
+published through the `node:diagnostics_channel` module, allowing the
+application to observe and log which operations would be denied under enforce
+mode. Execution continues normally.
+
+Audit mode is useful for discovering what permissions your application
+requires before deploying with [`--permission`][]. It can also be combined
+with the [`--allow-fs-read`][], [`--allow-fs-write`][], [`--allow-fs-vfs`][],
+[`--allow-net`][], [`--allow-env`][], [`--allow-child-process`][],
+[`--allow-worker`][], [`--allow-addons`][], [`--allow-wasi`][],
+[`--allow-ffi`][], [`--allow-inspector`][], and [`--allow-openssl-store`][]
+flags to audit a subset of permissions while granting others.
+
+When a permission check fails in audit mode, a message is published to the
+diagnostics channel corresponding to the denied scope. The channel names are:
+
+* `node:permission-model:fs` — File System (read and write)
+* `node:permission-model:net` — Network
+* `node:permission-model:child` — Child Process
+* `node:permission-model:worker` — Worker Threads
+* `node:permission-model:inspector` — Inspector
+* `node:permission-model:wasi` — WASI
+* `node:permission-model:addon` — Native Addons
+* `node:permission-model:ffi` — FFI
+* `node:permission-model:openssl-store` — OpenSSL STORE loaders
+* `node:permission-model:env` — Environment variables
+
+Each message is an object with the following properties:
+
+* `permission` {string} The name of the denied permission scope.
+* `resource` {string} The resource that access was denied to (e.g. a file path
+  or host).
+* `drop` {boolean|undefined} `true` when the message was published by
+  [`permission.drop()`][] rather than by a failed permission check.
+
+```js
+const diagnostics_channel = require('node:diagnostics_channel');
+
+diagnostics_channel.channel('node:permission-model:fs').subscribe((msg) => {
+  console.log(`Permission denied: ${msg.permission} on ${msg.resource}`);
+});
+
+// Running with --permission-audit, this publishes a diagnostics channel
+// message but does not throw
+const fs = require('node:fs');
+fs.readFileSync('/etc/passwd');
+```
+
+If both [`--permission`][] and [`--permission-audit`][] are specified,
+`--permission` takes precedence and the Permission Model runs in enforce mode.
+
+#### File System Permissions
+
+The Permission Model, by default, restricts access to the file system through the `node:fs` module.
+It does not guarantee that users will not be able to access the file system through other means,
+such as through the `node:sqlite` module.
+
+To allow access to the file system, use the [`--allow-fs-read`][] and
+[`--allow-fs-write`][] flags:
+
+```console
+$ node --permission --allow-fs-read=* --allow-fs-write=* index.js
+Hello world!
+```
+
+By default the entrypoints of your application are included
+in the allowed file system read list. For example:
+
+```console
+$ node --permission index.js
+```
+
+* `index.js` will be included in the allowed file system read list
+
+```console
+$ node -r /path/to/custom-require.js --permission index.js
+```
+
+* `/path/to/custom-require.js` will be included in the allowed file system read
+  list.
+* `index.js` will be included in the allowed file system read list.
+
+The valid arguments for both flags are:
+
+* `*` - To allow all `FileSystemRead` or `FileSystemWrite` operations,
+  respectively.
+* Relative paths to the current working directory.
+* Absolute paths.
+
+Example:
+
+* `--allow-fs-read=*` - It will allow all `FileSystemRead` operations.
+* `--allow-fs-write=*` - It will allow all `FileSystemWrite` operations.
+* `--allow-fs-write=/tmp/` - It will allow `FileSystemWrite` access to the `/tmp/`
+  folder.
+* `--allow-fs-read=/tmp/ --allow-fs-read=/home/.gitignore` - It allows `FileSystemRead` access
+  to the `/tmp/` folder **and** the `/home/.gitignore` path.
+
+Wildcards are supported too:
+
+* `--allow-fs-read=/home/test*` will allow read access to everything
+  that matches the wildcard. e.g: `/home/test/file1` or `/home/test2`
+
+After passing a wildcard character (`*`) all subsequent characters will
+be ignored. For example: `/home/*.js` will work similar to `/home/*`.
+
+When the permission model is initialized, it will automatically add a wildcard
+(\*) if the specified directory exists. For example, if `/home/test/files`
+exists, it will be treated as `/home/test/files/*`. However, if the directory
+does not exist, the wildcard will not be added, and access will be limited to
+`/home/test/files`. If you want to allow access to a folder that does not exist
+yet, make sure to explicitly include the wildcard:
+`/my-path/folder-do-not-exist/*`.
+
+Some `node:fs` operations act on an already-open file descriptor rather than a
+path, so they cannot be tied to a `--allow-fs-read` or `--allow-fs-write` grant.
+When the permission model is enabled these operations are disabled and throw
+`ERR_ACCESS_DENIED`, regardless of how the descriptor was obtained. This applies
+both to the top-level `node:fs` functions and to the equivalent
+`FileHandle` methods, and currently includes `fsync`/`fdatasync`,
+`fchmod`, `fchown`, and `futimes` (and their synchronous variants).
+
+#### Environment variable permissions
+
+When the Permission Model is enforced, the process only has access to the
+environment variables that [`--allow-env`][] grants access to.
+
+Instead of checking each access, Node.js removes every other variable from the
+process environment at startup, before any JavaScript code runs and before
+Node.js starts any other thread. Removed variables are absent from everything
+that exposes the environment of the process: `process.env`, diagnostic reports,
+native code calling `getenv()`, worker threads, and the environment inherited by
+child processes.
+
+```console
+$ node --permission --allow-env=PORT --allow-env=APP_* index.js
+```
+
+The valid arguments for the flag are:
+
+* `*` - Grants access to every environment variable. Nothing is removed.
+* A variable name, such as `PORT`.
+* A variable name prefix followed by `*`, such as `APP_*`.
+
+Some variables are always kept:
+
+* The variables that Node.js and its bundled dependencies read after startup,
+  such as `NODE_OPTIONS`, `NODE_EXTRA_CA_CERTS`, `PATH`, `HOME`, `TMPDIR`, `TZ`,
+  `LANG`, `SSL_CERT_FILE`, and the variables that terminal color detection
+  reads. Other variables whose names start with `NODE_`, such as
+  `NODE_AUTH_TOKEN`, are not kept.
+* The variables defined in the files passed to [`--env-file`][] and
+  [`--env-file-if-exists`][]. If a variable is defined in such a file and also
+  inherited from the parent process, and `--allow-env` does not grant access to
+  it, the inherited value is removed and the value from the file is used.
+
+`NODE_ENV` is not kept either. Node.js does not read it, but many applications
+and libraries do, and treat it being unset as a development environment. Grant
+access to it explicitly:
+
+```console
+$ node --permission --allow-env=NODE_ENV index.js
+```
+
+Proxy URLs often contain credentials, so the `HTTP_PROXY`, `HTTPS_PROXY`, and
+`NO_PROXY` variables, and their lowercase forms, are not kept. Grant access to
+them explicitly when using [`--use-env-proxy`][]. When `--use-env-proxy` is
+enabled and any of them were removed at startup, a warning naming them is
+emitted.
+
+Native code that Node.js loads on behalf of the application, such as addons,
+OpenSSL providers and STORE loaders, and the libraries they load in turn, sees
+the same reduced environment. Only the variables that OpenSSL itself reads are
+kept, not those read by third-party modules it loads. For example, a PKCS#11
+provider backed by SoftHSM needs `SOFTHSM2_CONF` to find its token, and fails to
+initialize without it. Grant access to such variables explicitly:
+
+```console
+$ node --permission --allow-openssl-store --allow-env=SOFTHSM2_CONF index.js
+```
+
+Reading a variable that was removed at startup returns `undefined`, emits a
+warning the first time, and publishes a message to the
+`node:permission-model:env` diagnostics channel.
+
+Variables set at runtime, for example with `process.env.KEY = 'value'` or
+[`process.loadEnvFile()`][], are not restricted, as they cannot reveal what was
+removed.
+
+Dropping a variable with [`permission.drop()`][] removes it from the
+environment. Dropping the whole `env` scope removes every variable except the
+ones Node.js reads itself. This makes it possible to read a secret during
+initialization, and then remove it:
+
+```js
+const databaseUrl = process.env.DATABASE_URL;
+process.permission.drop('env', 'DATABASE_URL');
+```
+
+Wildcards cannot be dropped: `process.permission.drop('env', 'APP_*')` and
+`process.permission.drop('env', '*')` throw `ERR_INVALID_ARG_VALUE`. To remove
+every variable, drop the whole `env` scope.
+
+When a process that enforces the Permission Model spawns a child process, the
+child is started with `--allow-env=*`: the environment it inherits only contains
+variables that the parent had access to. The child can still read its own
+`/proc/<pid>/environ` on Linux, but not that of any other process, see below.
+
+In audit mode, nothing is removed. Accesses to variables that `--allow-env`
+does not grant access to are published to the `node:permission-model:env`
+diagnostics channel instead.
+
+On Linux, `/proc/<pid>/environ` exposes the environment a process was started
+with. When the Permission Model is enforced, reading the `/proc/<pid>/environ`
+file of any other process, including the parent process and its ancestors, is
+denied regardless of [`--allow-fs-read`][]. Reading the process's own file is
+only allowed with `--allow-env=*`. Symbolic links are resolved before the
+check, so paths that reach these files indirectly, such as
+`/dev/fd/../environ`, are denied as well.
+
+In addition, the removed variables are overwritten in the initial environment
+block of the process, so that other processes do not find them in its
+`/proc/<pid>/environ` either. Variables removed later with
+[`permission.drop()`][] are overwritten there as well.
+
+These measures do not change the environment of other processes. A process
+granted [`--allow-child-process`][] can read their environment through other
+programs.
+
+#### Configuration file support
+
+In addition to passing permission flags on the command line, they can also be
+declared in a Node.js configuration file when using the [`--config-file`][]
+flag. Permission options must be placed inside the `permission` top-level
+object.
+
+Example `node.config.json`:
 
 ```json
 {
-  "scopes": {
-    "file:///C:/app/": {},
-    "file:": {},
-    "": {}
+  "permission": {
+    "allow-fs-read": ["./foo"],
+    "allow-fs-write": ["./bar"],
+    "allow-child-process": true,
+    "allow-worker": true,
+    "allow-net": true,
+    "allow-addons": false,
+    "allow-ffi": false,
+    "allow-openssl-store": false
   }
 }
 ```
 
-Given a file located at `file:///C:/app/bin/main.js`, the following scopes would
-be checked in order:
+When the `permission` namespace is present in the configuration file, Node.js
+automatically enables the `--permission` flag. Run with:
 
-1. `"file:///C:/app/bin/"`
-
-This determines the policy for all file based resources within
-`"file:///C:/app/bin/"`. This is not in the `"scopes"` field of the policy and
-would be skipped. Adding this scope to the policy would cause it to be used
-prior to the `"file:///C:/app/"` scope.
-
-2. `"file:///C:/app/"`
-
-This determines the policy for all file based resources within
-`"file:///C:/app/"`. This is in the `"scopes"` field of the policy and it would
-determine the policy for the resource at `file:///C:/app/bin/main.js`. If the
-scope has `"cascade": true`, any unsatisfied queries about the resource would
-delegate to the next relevant scope for `file:///C:/app/bin/main.js`, `"file:"`.
-
-3. `"file:///C:/"`
-
-This determines the policy for all file based resources within `"file:///C:/"`.
-This is not in the `"scopes"` field of the policy and would be skipped. It would
-not be used for `file:///C:/app/bin/main.js` unless `"file:///"` is set to
-cascade or is not in the `"scopes"` of the policy.
-
-4. `"file:///"`
-
-This determines the policy for all file based resources on the `localhost`. This
-is not in the `"scopes"` field of the policy and would be skipped. It would not
-be used for `file:///C:/app/bin/main.js` unless `"file:///"` is set to cascade
-or is not in the `"scopes"` of the policy.
-
-5. `"file:"`
-
-This determines the policy for all file based resources. It would not be used
-for `file:///C:/app/bin/main.js` unless `"file:///"` is set to cascade or is not
-in the `"scopes"` of the policy.
-
-6. `""`
-
-This determines the policy for all resources. It would not be used for
-`file:///C:/app/bin/main.js` unless `"file:"` is set to cascade.
-
-##### Integrity using scopes
-
-Setting an integrity to `true` on a scope will set the integrity for any
-resource not found in the manifest to `true`.
-
-Setting an integrity to `null` on a scope will set the integrity for any
-resource not found in the manifest to fail matching.
-
-Not including an integrity is the same as setting the integrity to `null`.
-
-`"cascade"` for integrity checks will be ignored if `"integrity"` is explicitly
-set.
-
-The following example allows loading any file:
-
-```json
-{
-  "scopes": {
-    "file:": {
-      "integrity": true
-    }
-  }
-}
+```console
+$ node --config-file app.js
 ```
 
-##### Dependency redirection using scopes
+A configuration file, like the `NODE_OPTIONS` defined in an [`--env-file`][]
+file, may be controlled by the project being run rather than by whoever starts
+Node.js. When the command line or the `NODE_OPTIONS` environment variable
+enable the Permission Model, the `allow-env` values these files define can only
+narrow the access that [`--allow-env`][] grants, and never widen it:
 
-The following example, would allow access to `fs` for all resources within
-`./app/`:
-
-```json
-{
-  "resources": {
-    "./app/checked.js": {
-      "cascade": true,
-      "integrity": true
-    }
-  },
-  "scopes": {
-    "./app/": {
-      "dependencies": {
-        "fs": true
-      }
-    }
-  }
-}
+```console
+$ node --permission --allow-env=APP_* --config-file=node.config.json app.js
 ```
 
-The following example, would allow access to `fs` for all `data:` resources:
+With `"allow-env": ["*"]` in `node.config.json`, only the variables starting with
+`APP_` are kept. With `"allow-env": ["APP_DATABASE_URL", "OTHER"]`, only
+`APP_DATABASE_URL` is.
 
-```json
-{
-  "resources": {
-    "data:text/javascript,import('node:fs');": {
-      "cascade": true,
-      "integrity": true
-    }
-  },
-  "scopes": {
-    "data:": {
-      "dependencies": {
-        "fs": true
-      }
-    }
-  }
-}
+#### Using the Permission Model with `npx`
+
+If you're using [`npx`][] to execute a Node.js script, you can enable the
+Permission Model by passing the `--node-options` flag. For example:
+
+```bash
+npx --node-options="--permission" package-name
 ```
 
-##### Example: [import maps][] emulation
+This sets the `NODE_OPTIONS` environment variable for all Node.js processes
+spawned by [`npx`][], without affecting the `npx` process itself.
 
-Given an import map:
+**FileSystemRead Error with `npx`**
 
-```json
-{
-  "imports": {
-    "react": "./app/node_modules/react/index.js"
-  },
-  "scopes": {
-    "./ssr/": {
-      "react": "./app/node_modules/server-side-react/index.js"
-    }
-  }
-}
-```
+The above command will likely throw a `FileSystemRead` invalid access error
+because Node.js requires file system read access to locate and execute the
+package. To avoid this:
 
-```json
-{
-  "dependencies": true,
-  "scopes": {
-    "": {
-      "cascade": true,
-      "dependencies": {
-        "react": "./app/node_modules/react/index.js"
-      }
-    },
-    "./ssr/": {
-      "cascade": true,
-      "dependencies": {
-        "react": "./app/node_modules/server-side-react/index.js"
-      }
-    }
-  }
-}
-```
+1. **Using a Globally Installed Package**
+   Grant read access to the global `node_modules` directory by running:
 
-Import maps assume you can get any resource by default. This means
-`"dependencies"` at the top level of the policy should be set to `true`.
-Policies require this to be opt-in since it enables all resources of the
-application cross linkage which doesn't make sense for many scenarios. They also
-assume any given scope has access to any scope above its allowed dependencies;
-all scopes emulating import maps must set `"cascade": true`.
+   ```bash
+   npx --node-options="--permission --allow-fs-read=$(npm prefix -g)" package-name
+   ```
 
-Import maps only have a single top level scope for their "imports". So for
-emulating `"imports"` use the `""` scope. For emulating `"scopes"` use the
-`"scopes"` in a similar manner to how `"scopes"` works in import maps.
+2. **Using the `npx` Cache**
+   If you are installing the package temporarily or relying on the `npx` cache,
+   grant read access to the npm cache directory:
 
-Caveats: Policies do not use string matching for various finding of scope. They
-do URL traversals. This means things like `blob:` and `data:` URLs might not be
-entirely interoperable between the two systems. For example import maps can
-partially match a `data:` or `blob:` URL by partitioning the URL on a `/`
-character, policies intentionally cannot. For `blob:` URLs import map scopes do
-not adopt the origin of the `blob:` URL.
+   ```bash
+   npx --node-options="--permission --allow-fs-read=$(npm config get cache)" package-name
+   ```
 
-Additionally, import maps only work on `import` so it may be desirable to add a
-`"import"` condition to all dependency mappings.
+Any arguments you would normally pass to `node` (e.g., `--allow-*` flags) can
+also be passed through the `--node-options` flag. This flexibility makes it
+easy to configure permissions as needed when using `npx`.
+
+#### Permission Model constraints
+
+There are constraints you need to know before using this system:
+
+* The model does not inherit to a worker thread. A default
+  `worker_threads.Worker` (no `execArgv` option) still receives the parent
+  process CLI flags, including `--permission` and `--allow-*` if those were
+  passed to the parent. Setting `execArgv` explicitly, including
+  `execArgv: []`, replaces the inherited flags. The worker then does not keep
+  the parent's Permission Model grants unless those flags are listed again in
+  `execArgv`. That difference is intended, not a bypass.
+* When using the Permission Model the following features will be restricted:
+  * Native modules
+  * Network
+  * Environment variables
+  * Child process
+  * Worker Threads
+  * Inspector protocol
+  * File system access
+  * WASI
+  * FFI
+  * OpenSSL STORE loaders
+  * Virtual file system mounting
+* The Permission Model is initialized after the Node.js environment is set up.
+  However, certain flags such as `--env-file` or `--openssl-config` are designed
+  to read files before environment initialization. As a result, such flags are
+  not subject to the rules of the Permission Model. The same applies for V8
+  flags that can be set via runtime through `v8.setFlagsFromString`.
+* Files that Node.js itself creates, writes, or reads at a location selected
+  by an operator flag may not be consistently checked against the Permission
+  Model, in particular when the flag accepts a template or pattern that
+  expands to several paths. For example, trace files rotated by
+  `--trace-event-file-pattern` (`${rotation}`) can be written even when the
+  expanded path is not covered by `--allow-fs-write`. Because the location is
+  chosen by the operator, gaps like this are treated as regular bugs rather
+  than vulnerabilities. Please report them through the regular issue tracker.
+* Run-Time Loadable Extensions cannot be loaded when the Permission Model is
+  enabled, affecting the sqlite module.
+* Using existing file descriptors via the `node:fs` module bypasses the
+  Permission Model.
+
+#### process.\_debugProcess() and cross-process Inspector activation
+
+The `kInspector` permission scope restricts the current process from opening its own V8 Inspector. However,
+process.\_debugProcess(pid) — which sends an OS-level signal (SIGUSR1 on POSIX, a remote thread on Windows)
+to an external process — is not gated by the `kInspector` scope or any other Permission Model scope.
+
+A sandboxed process running under --permission with no additional grants can call process.\_debugProcess(pid)
+to force another Node.js process to open its V8 Inspector. The target process does not need to be running
+under --permission for this to work — any Node.js process running on the same host under the same OS user
+can be signaled.
+
+This is consistent with the Node.js threat model: Node.js trusts the OS environment in which it runs.
+Cross-process signaling is an operating-system-level capability; restricting it is the responsibility of
+the operator (for example, using OS-level process isolation, separate OS users per process, or
+seccomp/AppArmor profiles on Linux).
+
+Developers relying on --permission to sandbox untrusted code should be aware that:
+
+* process.\_debugProcess() is callable from any sandboxed process with no grants.
+* If a target Node.js process is running on the same host under the same OS user, it can be forced to
+  open its Inspector via this API.
+* To prevent this, run sandboxed and target processes under different OS users, or use OS-level isolation
+  mechanisms outside of Node.js.
+
+#### Limitations and Known Issues
+
+* Symbolic links will be followed even to locations outside of the set of paths
+  that access has been granted to. Relative symbolic links may allow access to
+  arbitrary files and directories. When starting applications with the
+  permission model enabled, you must ensure that no paths to which access has
+  been granted contain relative symbolic links.
 
 [Security Policy]: https://github.com/nodejs/node/blob/main/SECURITY.md
-[import maps]: https://url.spec.whatwg.org/#relative-url-with-fragment-string
-[relative-url string]: https://url.spec.whatwg.org/#relative-url-with-fragment-string
-[special schemes]: https://url.spec.whatwg.org/#special-scheme
+[`--allow-addons`]: cli.md#--allow-addons
+[`--allow-child-process`]: cli.md#--allow-child-process
+[`--allow-env`]: cli.md#--allow-env
+[`--allow-ffi`]: cli.md#--allow-ffi
+[`--allow-fs-read`]: cli.md#--allow-fs-read
+[`--allow-fs-vfs`]: cli.md#--allow-fs-vfs
+[`--allow-fs-write`]: cli.md#--allow-fs-write
+[`--allow-inspector`]: cli.md#--allow-inspector
+[`--allow-net`]: cli.md#--allow-net
+[`--allow-openssl-store`]: cli.md#--allow-openssl-store
+[`--allow-wasi`]: cli.md#--allow-wasi
+[`--allow-worker`]: cli.md#--allow-worker
+[`--config-file`]: cli.md#--config-filepath---config-file
+[`--env-file-if-exists`]: cli.md#--env-file-if-existsfile
+[`--env-file`]: cli.md#--env-filefile
+[`--permission-audit`]: cli.md#--permission-audit
+[`--permission`]: cli.md#--permission
+[`--use-env-proxy`]: cli.md#--use-env-proxy
+[`crypto.createPrivateKey()`]: crypto.md#cryptocreateprivatekeykey
+[`npx`]: https://docs.npmjs.com/cli/commands/npx
+[`permission.drop()`]: process.md#processpermissiondropscope-reference
+[`permission.has()`]: process.md#processpermissionhasscope-reference
+[`process.loadEnvFile()`]: process.md#processloadenvfilepath
+[`vfs.mount()`]: vfs.md#vfsmount
+[virtual file system]: vfs.md

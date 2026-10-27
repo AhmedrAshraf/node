@@ -21,23 +21,30 @@
 
 'use strict';
 const common = require('../common');
-if (!common.hasCrypto)
+if (!common.hasCrypto) {
   common.skip('missing crypto');
+}
 
 const assert = require('assert');
 const crypto = require('crypto');
+const { hasFIPS, isBoringSSL } = require('../common/crypto');
 
 function test() {
   const odd = Buffer.alloc(39, 'A');
 
-  const c = crypto.createDiffieHellman(common.hasOpenSSL3 ? 1024 : 32);
+  const size = hasFIPS(3) ? 2048 : (isBoringSSL ? 32 : 1024);
+  const c = crypto.createDiffieHellman(size);
   c.setPrivateKey(odd);
   c.generateKeys();
 }
 
-// FIPS requires a length of at least 1024
-if (!common.hasFipsCrypto) {
+if (hasFIPS(3)) {
+  test();
+  assert.throws(() => crypto.createDiffieHellman(1024), {
+    code: 'ERR_INVALID_ARG_VALUE',
+  });
+} else if (crypto.getFips() !== 1) {
   test();
 } else {
-  assert.throws(function() { test(); }, /key size too small/);
+  assert.throws(test, /key size too small/);
 }

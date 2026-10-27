@@ -3,17 +3,25 @@
 
 #include "env-inl.h"
 #include "node_binding.h"
+#include "node_errors.h"
 #include "node_external_reference.h"
 #include "node_internals.h"
+#include "node_sea.h"
+#include "permission/env_permission.h"
+#include "uv.h"
 #if HAVE_OPENSSL
-#include "openssl/opensslv.h"
+#include "ncrypto.h"  // Defines OPENSSL_VERSION_PREREQ for BoringSSL.
+#include "quic/guard.h"
 #endif
 
-#include <errno.h>
-#include <sstream>
-#include <limits>
 #include <algorithm>
-#include <cstdlib>  // strtoul, errno
+#include <array>
+#include <charconv>
+#include <cstdint>
+#include <limits>
+#include <sstream>
+#include <string_view>
+#include <vector>
 
 using v8::Boolean;
 using v8::Context;
@@ -21,13 +29,18 @@ using v8::FunctionCallbackInfo;
 using v8::Integer;
 using v8::Isolate;
 using v8::Local;
+using v8::LocalVector;
 using v8::Map;
+using v8::Name;
+using v8::Null;
 using v8::Number;
 using v8::Object;
+using v8::String;
 using v8::Undefined;
 using v8::Value;
-
 namespace node {
+
+constexpr bool kStrictOptionParsing = true;
 
 namespace per_process {
 Mutex cli_options_mutex;
@@ -49,31 +62,100 @@ void DebugOptions::CheckOptions(std::vector<std::string>* errors,
                       "`node --inspect-brk` instead.");
   }
 
-  std::vector<std::string> destinations =
-      SplitString(inspect_publish_uid_string, ',');
+  using std::operator""sv;
+  auto entries = std::views::split(inspect_publish_uid_string, ","sv);
   inspect_publish_uid.console = false;
   inspect_publish_uid.http = false;
-  for (const std::string& destination : destinations) {
-    if (destination == "stderr") {
+  for (const auto& entry : entries) {
+    std::string_view destination(entry.data(), entry.size());
+    if (destination == "stderr"sv) {
       inspect_publish_uid.console = true;
-    } else if (destination == "http") {
+    } else if (destination == "http"sv) {
       inspect_publish_uid.http = true;
     } else {
-      errors->push_back("--inspect-publish-uid destination can be "
-                        "stderr or http");
+      errors->emplace_back("--inspect-publish-uid destination can be "
+                           "stderr or http");
     }
   }
 }
 
+namespace {
+// Parses a duration made of a positive integer and a unit, such as "500ms",
+// "30s", "5m" or "1h", into milliseconds.
+bool ParseDurationMilliseconds(std::string_view value, uint64_t* result) {
+  size_t digits = 0;
+  while (digits < value.size() && value[digits] >= '0' && value[digits] <= '9')
+    digits++;
+  if (digits == 0) return false;
+
+  const std::string_view unit = value.substr(digits);
+  uint64_t multiplier;
+  if (unit == "ms") {
+    multiplier = 1;
+  } else if (unit == "s") {
+    multiplier = 1000;
+  } else if (unit == "m") {
+    multiplier = 60 * 1000;
+  } else if (unit == "h") {
+    multiplier = 60 * 60 * 1000;
+  } else {
+    return false;
+  }
+
+  uint64_t amount;
+  const char* end = value.data() + digits;
+  const auto parsed = std::from_chars(value.data(), end, amount);
+  if (parsed.ec != std::errc() || parsed.ptr != end) return false;
+
+  // The deadline is computed in nanoseconds relative to the process start
+  // time, so keep plenty of headroom in a uint64_t.
+  static constexpr uint64_t kMaxMilliseconds =
+      std::numeric_limits<uint64_t>::max() / 2 / 1000000;
+  if (amount == 0 || amount > kMaxMilliseconds / multiplier) return false;
+
+  *result = amount * multiplier;
+  return true;
+}
+}  // namespace
+
 void PerProcessOptions::CheckOptions(std::vector<std::string>* errors,
                                      std::vector<std::string>* argv) {
+  if (process_timeout.empty()) {
+    process_timeout_ms = 0;
+  } else if (!ParseDurationMilliseconds(process_timeout, &process_timeout_ms)) {
+    process_timeout_ms = 0;
+    errors->push_back("invalid value for --process-timeout: '" +
+                      process_timeout +
+                      "'. Expected a positive integer followed by a unit "
+                      "(ms, s, m or h), e.g. 30s");
+  }
+
 #if HAVE_OPENSSL
   if (use_openssl_ca && use_bundled_ca) {
     errors->push_back("either --use-openssl-ca or --use-bundled-ca can be "
                       "used, not both");
   }
 
+  if (force_fips_crypto_policy != "provider" &&
+      force_fips_crypto_policy != "strict") {
+    errors->push_back(
+        "invalid value for --force-fips; expected 'provider' or 'strict'");
+  }
+
+#if defined(OPENSSL_IS_BORINGSSL) || !OPENSSL_VERSION_PREREQ(3, 4)
+  if (enable_fips_indicator_events) {
+    errors->push_back(
+        "--enable-fips-indicator-events requires OpenSSL 3.4 or later");
+  }
+
+  if (force_fips_crypto && force_fips_crypto_policy == "strict") {
+    errors->push_back("--force-fips=strict requires OpenSSL 3.4 or later");
+  }
+#endif
+
   // Any value less than 2 disables use of the secure heap.
+#ifndef V8_ENABLE_SANDBOX
+  // The secure heap is not supported when V8_ENABLE_SANDBOX is enabled.
   if (secure_heap >= 2) {
     if ((secure_heap & (secure_heap - 1)) != 0)
       errors->push_back("--secure-heap must be a power of 2");
@@ -86,7 +168,17 @@ void PerProcessOptions::CheckOptions(std::vector<std::string>* errors,
     if ((secure_heap_min & (secure_heap_min - 1)) != 0)
       errors->push_back("--secure-heap-min must be a power of 2");
   }
+#endif  // V8_ENABLE_SANDBOX
 #endif  // HAVE_OPENSSL
+
+  if (!build_sea.empty()) {
+#if defined(DISABLE_SINGLE_EXECUTABLE_APPLICATION)
+    errors->push_back("Single executable application is disabled.\n");
+#elif !defined(HAVE_LIEF)
+    errors->push_back(
+        "Node.js must be built with LIEF to build support --build-sea.\n");
+#endif  // !defined(HAVE_LIEF)
+  }
 
   if (use_largepages != "off" &&
       use_largepages != "on" &&
@@ -96,29 +188,151 @@ void PerProcessOptions::CheckOptions(std::vector<std::string>* errors,
   per_isolate->CheckOptions(errors, argv);
 }
 
+void PerProcessOptions::CheckProcessTimeoutOptions(
+    std::vector<std::string>* errors,
+    const std::vector<std::string>& argv) const {
+  if (process_timeout.empty()) {
+    if (report_on_process_timeout) {
+      errors->push_back(
+          "--report-on-process-timeout must be used with --process-timeout");
+    }
+    return;
+  }
+
+  // A process that is being debugged can be paused indefinitely, which would
+  // make the timeout fire while the debugger is in control, so the two cannot
+  // be combined. Runtime activation of the inspector is rejected separately.
+  const DebugOptions& debug_options = per_isolate->per_env->debug_options();
+  const char* debug_option = nullptr;
+  if (debug_options.break_node_first_line) {
+    debug_option = "--inspect-brk-node";
+  } else if (debug_options.break_first_line) {
+    debug_option = "--inspect-brk";
+  } else if (debug_options.inspect_wait) {
+    debug_option = "--inspect-wait";
+  } else if (debug_options.inspector_enabled) {
+    debug_option = "--inspect";
+  } else if (debug_options.host_port.host() != "127.0.0.1" ||
+             debug_options.host_port.port() !=
+                 DebugOptions::kDefaultInspectorPort) {
+    // We can't catch the case where the value passed is the default value,
+    // then the option just becomes a noop which is fine.
+    debug_option = "--inspect-port";
+  } else if (debug_options.inspect_publish_uid_string != "stderr,http") {
+    debug_option = "--inspect-publish-uid";
+  }
+  if (debug_option != nullptr) {
+    errors->push_back(std::string("either --process-timeout or ") +
+                      debug_option + " can be used, not both");
+  }
+
+  if (argv.size() > 1 && argv[1] == "inspect") {
+    errors->push_back("--process-timeout cannot be used with `node inspect`");
+  }
+
+  if (has_run) {
+    errors->push_back(
+        "either --process-timeout or --run can be used, not both");
+  }
+
+  if (per_isolate->build_snapshot) {
+    errors->push_back(
+        "either --process-timeout or --build-snapshot can be used, not both");
+  }
+}
+
+void PerIsolateOptions::HandleMaxOldSpaceSizePercentage(
+    std::vector<std::string>* errors,
+    std::string* max_old_space_size_percentage) {
+  std::string original_input_for_error = *max_old_space_size_percentage;
+  // Parse the percentage value
+  char* end_ptr;
+  double percentage =
+      std::strtod(max_old_space_size_percentage->c_str(), &end_ptr);
+
+  // Validate the percentage value
+  if (*end_ptr != '\0' || percentage <= 0.0 || percentage > 100.0) {
+    errors->push_back("--max-old-space-size-percentage must be greater "
+                      "than 0 and up to 100. Got: " +
+                      original_input_for_error);
+    return;
+  }
+
+  // Get available memory in bytes
+#ifdef V8_COMPRESS_POINTERS
+  // When pointer compression is enabled, V8 uses a 4 GiB heap limit.
+  // We'll use the smaller of that or the total system memory as
+  // reported by uv.
+  uint64_t total_memory =
+      std::min(uv_get_total_memory(), kMaxPointerCompressionHeap);  // 4 GiB
+#else
+  uint64_t total_memory = uv_get_total_memory();
+#endif
+  uint64_t constrained_memory = uv_get_constrained_memory();
+
+  // Use constrained memory if available, otherwise use total memory
+  // This logic correctly handles the documented guarantees.
+  // Use uint64_t for the result to prevent data loss on 32-bit systems.
+  uint64_t available_memory =
+      (constrained_memory > 0 && constrained_memory != UINT64_MAX)
+          ? constrained_memory
+          : total_memory;
+
+  if (available_memory == 0) {
+    errors->push_back("the available memory can not be calculated");
+    return;
+  }
+
+  // Convert to MB and calculate the percentage
+  uint64_t memory_mb = available_memory / (1024 * 1024);
+  uint64_t calculated_mb = static_cast<size_t>(memory_mb * percentage / 100.0);
+
+  // Convert back to string
+  max_old_space_size = std::to_string(calculated_mb);
+}
+
 void PerIsolateOptions::CheckOptions(std::vector<std::string>* errors,
                                      std::vector<std::string>* argv) {
+  if (!max_old_space_size_percentage.empty()) {
+    HandleMaxOldSpaceSizePercentage(errors, &max_old_space_size_percentage);
+  }
+
   per_env->CheckOptions(errors, argv);
 }
 
 void EnvironmentOptions::CheckOptions(std::vector<std::string>* errors,
                                       std::vector<std::string>* argv) {
-  if (has_policy_integrity_string && experimental_policy.empty()) {
-    errors->push_back("--policy-integrity requires "
-                      "--experimental-policy be enabled");
-  }
-  if (has_policy_integrity_string && experimental_policy_integrity.empty()) {
-    errors->push_back("--policy-integrity cannot be empty");
-  }
-
-  if (!module_type.empty()) {
-    if (module_type != "commonjs" && module_type != "module") {
-      errors->push_back("--input-type must be \"module\" or \"commonjs\"");
+  if (!input_type.empty()) {
+    if (input_type != "commonjs" && input_type != "module" &&
+        input_type != "commonjs-typescript" &&
+        input_type != "module-typescript") {
+      errors->push_back(
+          "--input-type must be \"module\","
+          "\"commonjs\", \"module-typescript\" or \"commonjs-typescript\"");
     }
   }
 
   if (syntax_check_only && has_eval_string) {
     errors->push_back("either --check or --eval can be used, not both");
+  }
+
+#ifndef DISABLE_SINGLE_EXECUTABLE_APPLICATION
+  sea_vfs_archive = sea::IsSingleExecutable() &&
+                    sea::FindSingleExecutableResource().use_vfs_archive();
+  // The archive takes the mount point reserved for the --vfs-load source.
+  if (!vfs_load_source.empty() && sea_vfs_archive) {
+    errors->push_back(
+        "--vfs-load cannot be used in a single executable application "
+        "built with \"vfsArchive\"");
+  }
+#endif  // DISABLE_SINGLE_EXECUTABLE_APPLICATION
+
+  for (const std::string& pattern : permission::ParseEnvAllowList(allow_env)) {
+    if (!permission::IsValidEnvAllowPattern(pattern)) {
+      errors->push_back("--allow-env must be '*', a variable name, or a "
+                        "variable name prefix followed by '*'");
+      break;
+    }
   }
 
   if (!unhandled_rejections.empty() &&
@@ -135,11 +349,71 @@ void EnvironmentOptions::CheckOptions(std::vector<std::string>* errors,
                       "used, not both");
   }
 
+#if HAVE_OPENSSL
+  if (use_system_ca && per_process::cli_options->use_openssl_ca) {
+    errors->push_back("either --use-openssl-ca or --use-system-ca can be "
+                      "used, not both");
+  }
+#endif  // HAVE_OPENSSL
+
   if (heap_snapshot_near_heap_limit < 0) {
     errors->push_back("--heapsnapshot-near-heap-limit must not be negative");
   }
 
+  if (!trace_require_module.empty() && trace_require_module != "all" &&
+      trace_require_module != "no-node-modules") {
+    errors->push_back("invalid value for --trace-require-module");
+  }
+
+  // NOTE: `has_bench_options` is deliberately *not* validated against
+  // `experimental_bench` here; see CheckBenchOptions(), which callers invoke
+  // once every option source has been parsed.
+
+  if (bench_runner && test_runner) {
+    errors->push_back("either --bench or --test can be used, not both");
+  }
+
+  if (bench_runner) {
+    if (bench_isolation == "none") {
+      debug_options_.allow_attaching_debugger = true;
+    } else {
+      if (bench_isolation != "process") {
+        errors->push_back("invalid value for --bench-isolation");
+      }
+
+      debug_options_.allow_attaching_debugger = false;
+    }
+    if (has_bench_samples && bench_samples == 0) {
+      errors->push_back("--bench-samples must be greater than 0");
+    }
+    if (syntax_check_only) {
+      errors->push_back("either --bench or --check can be used, not both");
+    }
+    if (has_eval_string) {
+      errors->push_back("either --bench or --eval can be used, not both");
+    }
+    if (force_repl) {
+      errors->push_back(
+          "either --bench or --interactive can be used, not both");
+    }
+    if (watch_mode || !watch_mode_paths.empty()) {
+      errors->push_back("either --bench or --watch can be used, not both");
+    }
+  }
+
   if (test_runner) {
+    if (test_isolation == "none") {
+      debug_options_.allow_attaching_debugger = true;
+    } else {
+      if (test_isolation != "process") {
+        errors->push_back("invalid value for --test-isolation");
+      }
+
+#ifndef ALLOW_ATTACHING_DEBUGGER_IN_TEST_RUNNER
+      debug_options_.allow_attaching_debugger = false;
+#endif
+    }
+
     if (syntax_check_only) {
       errors->push_back("either --test or --check can be used, not both");
     }
@@ -156,10 +430,6 @@ void EnvironmentOptions::CheckOptions(std::vector<std::string>* errors,
       errors->push_back(
           "--watch-path cannot be used in combination with --test");
     }
-
-#ifndef ALLOW_ATTACHING_DEBUGGER_IN_TEST_RUNNER
-    debug_options_.allow_attaching_debugger = false;
-#endif
   }
 
   if (watch_mode) {
@@ -170,7 +440,10 @@ void EnvironmentOptions::CheckOptions(std::vector<std::string>* errors,
     } else if (force_repl) {
       errors->push_back("either --watch or --interactive "
                         "can be used, not both");
-    } else if (argv->size() < 1 || (*argv)[1].empty()) {
+    } else if (test_runner_force_exit) {
+      errors->push_back("either --watch or --test-force-exit "
+                        "can be used, not both");
+    } else if (!test_runner && watch_mode_paths.empty() && argv->size() < 1) {
       errors->push_back("--watch requires specifying a file");
     }
 
@@ -220,7 +493,92 @@ void EnvironmentOptions::CheckOptions(std::vector<std::string>* errors,
 #endif  // HAVE_INSPECTOR
 }
 
+void EnvironmentOptions::CheckBenchOptions(
+    std::vector<std::string>* errors) const {
+  if (has_bench_options && !experimental_bench) {
+    errors->push_back(
+        "--experimental-bench is required to use --bench or related options");
+  }
+}
+
 namespace options_parser {
+
+// Helper function to convert option types to their string representation
+// and add them to a V8 Map
+static bool AddOptionTypeToObject(Isolate* isolate,
+                                  Local<Context> context,
+                                  Local<Object> object,
+                                  const std::string& option_name,
+                                  const OptionMappingDetails& option_details) {
+  std::string type;
+  switch (static_cast<int>(option_details.type)) {
+    case 0:   // No-op
+    case 1:   // V8 flags
+      break;  // V8 and NoOp flags are not supported
+
+    case 2:
+      type = "boolean";
+      break;
+    case 3:  // integer
+    case 4:  // unsigned integer
+    case 6:  // host port
+      type = "number";
+      break;
+    case 5:  // string
+      type = "string";
+      break;
+    case 7:  // string array
+      type = "array";
+      break;
+    default:
+      UNREACHABLE();
+  }
+
+  if (type.empty()) {
+    return true;  // Skip this entry but continue processing
+  }
+
+  Local<String> option_key;
+  if (!String::NewFromUtf8(isolate,
+                           option_name.data(),
+                           v8::NewStringType::kNormal,
+                           option_name.size())
+           .ToLocal(&option_key)) {
+    return true;  // Skip this entry but continue processing
+  }
+
+  Local<String> type_value;
+  if (!String::NewFromUtf8(
+           isolate, type.data(), v8::NewStringType::kNormal, type.size())
+           .ToLocal(&type_value)) {
+    return true;  // Skip this entry but continue processing
+  }
+
+  Local<String> help_text;
+  if (!String::NewFromUtf8(isolate,
+                           option_details.help_text.data(),
+                           v8::NewStringType::kNormal,
+                           option_details.help_text.size())
+           .ToLocal(&help_text)) {
+    return true;  // Skip this entry but continue processing
+  }
+
+  // Create an object with type and help_text properties
+  Local<Value> null_value = Null(isolate);
+  constexpr size_t kOptionInfoLength = 2;
+  std::array<Local<Name>, kOptionInfoLength> names = {
+      String::NewFromUtf8Literal(isolate, "type"),
+      String::NewFromUtf8Literal(isolate, "description")};
+  std::array<Local<Value>, kOptionInfoLength> values = {type_value, help_text};
+  Local<Object> option_info = Object::New(
+      isolate, null_value, names.data(), values.data(), kOptionInfoLength);
+
+  if (object->Set(context, option_key, option_info).IsNothing()) {
+    return false;  // Error occurred, stop processing
+  }
+
+  return true;
+}
 
 class DebugOptionsParser : public OptionsParser<DebugOptions> {
  public:
@@ -301,25 +659,33 @@ DebugOptionsParser::DebugOptionsParser() {
 
   AddOption("--inspect",
             "activate inspector on host:port (default: 127.0.0.1:9229)",
-            &DebugOptions::inspector_enabled,
+            BOOL_FIELD(inspector_enabled),
             kAllowedInEnvvar);
   AddAlias("--inspect=", { "--inspect-port", "--inspect" });
 
-  AddOption("--debug", "", &DebugOptions::deprecated_debug);
+  AddOption("--debug", "", BOOL_FIELD(deprecated_debug));
   AddAlias("--debug=", "--debug");
-  AddOption("--debug-brk", "", &DebugOptions::deprecated_debug);
+  AddOption("--debug-brk", "", BOOL_FIELD(deprecated_debug));
   AddAlias("--debug-brk=", "--debug-brk");
 
   AddOption("--inspect-brk",
             "activate inspector on host:port and break at start of user script",
-            &DebugOptions::break_first_line,
+            BOOL_FIELD(break_first_line),
             kAllowedInEnvvar);
   Implies("--inspect-brk", "--inspect");
   AddAlias("--inspect-brk=", { "--inspect-port", "--inspect-brk" });
 
-  AddOption("--inspect-brk-node", "", &DebugOptions::break_node_first_line);
+  AddOption("--inspect-brk-node", "", BOOL_FIELD(break_node_first_line));
   Implies("--inspect-brk-node", "--inspect");
   AddAlias("--inspect-brk-node=", { "--inspect-port", "--inspect-brk-node" });
+
+  AddOption(
+      "--inspect-wait",
+      "activate inspector on host:port and wait for debugger to be attached",
+      BOOL_FIELD(inspect_wait),
+      kAllowedInEnvvar);
+  Implies("--inspect-wait", "--inspect");
+  AddAlias("--inspect-wait=", {"--inspect-port", "--inspect-wait"});
 
   AddOption("--inspect-publish-uid",
             "comma separated list of destinations for inspector uid"
@@ -334,38 +700,159 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             &EnvironmentOptions::conditions,
             kAllowedInEnvvar);
   AddAlias("-C", "--conditions");
+  AddOption("--experimental-detect-module",
+            "when ambiguous modules fail to evaluate because they contain "
+            "ES module syntax, try again to evaluate them as ES modules",
+            BOOL_FIELD(detect_module),
+            kAllowedInEnvvar,
+            true);
+  AddOption("--experimental-print-required-tla",
+            "Print pending top-level await. If --require-module "
+            "is true, evaluate asynchronous graphs loaded by `require()` but "
+            "do not run the microtasks, in order to find and print "
+            "top-level await in the graph",
+            BOOL_FIELD(print_required_tla),
+            kAllowedInEnvvar);
+  AddOption("--require-module",
+            "Allow loading synchronous ES Modules in require().",
+            BOOL_FIELD(require_module),
+            kAllowedInEnvvar,
+            true);
+  AddOption("--experimental-require-module",
+            "Legacy alias for --require-module",
+            BOOL_FIELD(require_module),
+            kAllowedInEnvvar,
+            true);
+  Implies("--experimental-require-module", "--require-module");
   AddOption("--diagnostic-dir",
             "set dir for all output files"
             " (default: current working directory)",
             &EnvironmentOptions::diagnostic_dir,
             kAllowedInEnvvar);
+  AddOption("--disable-sigusr1",
+            "Disable inspector thread to be listening for SIGUSR1 signal",
+            BOOL_FIELD(disable_sigusr1),
+            kAllowedInEnvvar,
+            false);
   AddOption("--dns-result-order",
             "set default value of verbatim in dns.lookup. Options are "
             "'ipv4first' (IPv4 addresses are placed before IPv6 addresses) "
+            "'ipv6first' (IPv6 addresses are placed before IPv4 addresses) "
             "'verbatim' (addresses are in the order the DNS resolver "
             "returned)",
             &EnvironmentOptions::dns_result_order,
             kAllowedInEnvvar);
+  AddOption("--network-family-autoselection",
+            "Disable network address family autodetection algorithm",
+            BOOL_FIELD(network_family_autoselection),
+            kAllowedInEnvvar,
+            true);
+  AddOption("--network-family-autoselection-attempt-timeout",
+            "Sets the default value for the network family autoselection "
+            "attempt timeout.",
+            &EnvironmentOptions::network_family_autoselection_attempt_timeout,
+            kAllowedInEnvvar);
+  AddAlias("--enable-network-family-autoselection",
+           "--network-family-autoselection");
   AddOption("--enable-source-maps",
             "Source Map V3 support for stack traces",
-            &EnvironmentOptions::enable_source_maps,
+            BOOL_FIELD(enable_source_maps),
+            kAllowedInEnvvar);
+  AddOption("--entry-url",
+            "Treat the entrypoint as a URL",
+            BOOL_FIELD(entry_is_url),
+            kAllowedInEnvvar);
+  AddOption("--experimental-addon-modules",
+            "experimental import support for addons",
+            BOOL_FIELD(experimental_addon_modules),
+            kAllowedInEnvvar);
+  AddOption("--experimental-bench",
+            "experimental node:bench module and benchmark runner",
+            BOOL_FIELD(experimental_bench),
             kAllowedInEnvvar);
   AddOption("--experimental-abortcontroller", "", NoOp{}, kAllowedInEnvvar);
-  AddOption("--experimental-fetch",
-            "experimental Fetch API",
-            &EnvironmentOptions::experimental_fetch,
+  AddOption("--experimental-eventsource",
+            "experimental EventSource API",
+            BOOL_FIELD(experimental_eventsource),
+            kAllowedInEnvvar,
+            false);
+  AddOption("--experimental-fetch", "", NoOp{}, kAllowedInEnvvar);
+#if HAVE_FFI
+  AddOption("--experimental-ffi",
+            "experimental node:ffi module",
+            BOOL_FIELD(experimental_ffi),
+            kAllowedInEnvvar,
+            HAVE_FFI);
+#endif  // HAVE_FFI
+  AddOption("--experimental-web-worker",
+            "experimental Web Worker API",
+            BOOL_FIELD(experimental_web_worker),
+            kAllowedInEnvvar,
+            false);
+  AddOption("--experimental-websocket", "", NoOp{}, kAllowedInEnvvar);
+  AddOption("--experimental-global-customevent", "", NoOp{}, kAllowedInEnvvar);
+  AddOption("--experimental-sqlite",
+            "experimental node:sqlite module",
+            BOOL_FIELD(experimental_sqlite),
+            kAllowedInEnvvar,
+            HAVE_SQLITE);
+  AddOption("--experimental-stream-iter",
+            "experimental iterable streams API (node:stream/iter)",
+            BOOL_FIELD(experimental_stream_iter),
+            kAllowedInEnvvar);
+  AddOption("--experimental-dtls",
+#if HAVE_DTLS
+            "experimental DTLS support",
+            BOOL_FIELD(experimental_dtls),
+#else
+            "" /* undocumented when no-op */,
+            NoOp{},
+#endif
+            kAllowedInEnvvar);
+  AddOption("--experimental-vfs",
+            "experimental node:vfs module",
+            BOOL_FIELD(experimental_vfs),
             kAllowedInEnvvar,
             true);
-  AddOption("--experimental-global-customevent",
-            "expose experimental CustomEvent on the global scope",
-            &EnvironmentOptions::experimental_global_customevent,
+  // Choosing the entry point is the command line's alone: an environment
+  // variable must not be able to redirect what a `node <args>` invocation runs,
+  // so this is rejected in NODE_OPTIONS. The source and whether to run from it
+  // are separate fields so that a worker can inherit the mount without
+  // inheriting the entry point.
+  AddOption("--vfs-load",
+            "mount a directory or archive as a virtual file system and run the "
+            "entry point and module resolution against it instead of the real "
+            "file system (may be given once)",
+            &EnvironmentOptions::vfs_load_source,
+            kDisallowedInEnvvar);
+  AddOption("[vfs_load_set]", "", BOOL_FIELD(vfs_load));
+  Implies("--vfs-load", "[vfs_load_set]");
+  AddOption("[sea_vfs_archive]", "", BOOL_FIELD(sea_vfs_archive));
+  AddOption("--experimental-quic",
+#ifndef OPENSSL_NO_QUIC
+            "experimental QUIC support",
+            BOOL_FIELD(experimental_quic),
+#else
+            "" /* undocumented when no-op */,
+            NoOp{},
+#endif
+            kAllowedInEnvvar);
+  AddOption("--experimental-webstorage",
+            "experimental Web Storage API",
+            BOOL_FIELD(webstorage),
+            kAllowedInEnvvar,
+            HAVE_SQLITE);
+  AddAlias("--webstorage", "--experimental-webstorage");
+  AddOption("--localstorage-file",
+            "file used to persist localStorage data",
+            &EnvironmentOptions::localstorage_file,
+            kAllowedInEnvvar);
+  AddOption("--experimental-global-navigator",
+            "expose experimental Navigator API on the global scope",
+            BOOL_FIELD(experimental_global_navigator),
             kAllowedInEnvvar,
             true);
-  AddOption("--experimental-global-webcrypto",
-            "expose experimental Web Crypto API on the global scope",
-            &EnvironmentOptions::experimental_global_web_crypto,
-            kAllowedInEnvvar,
-            true);
+  AddOption("--experimental-global-webcrypto", "", NoOp{}, kAllowedInEnvvar);
   AddOption("--experimental-json-modules", "", NoOp{}, kAllowedInEnvvar);
   AddOption("--experimental-loader",
             "use the specified module as a custom loader",
@@ -373,51 +860,113 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             kAllowedInEnvvar);
   AddAlias("--loader", "--experimental-loader");
   AddOption("--experimental-modules", "", NoOp{}, kAllowedInEnvvar);
-  AddOption("--experimental-network-imports",
-            "experimental https: support for the ES Module loader",
-            &EnvironmentOptions::experimental_https_modules,
-            kAllowedInEnvvar);
-  AddOption("--experimental-wasm-modules",
-            "experimental ES Module support for webassembly modules",
-            &EnvironmentOptions::experimental_wasm_modules,
+  AddOption("--experimental-wasm-modules", "", NoOp{}, kAllowedInEnvvar);
+  AddOption("--experimental-import-text",
+            "experimental support for importing source as text with import "
+            "attributes",
+            BOOL_FIELD(experimental_import_text),
             kAllowedInEnvvar);
   AddOption("--experimental-import-meta-resolve",
-            "experimental ES Module import.meta.resolve() support",
-            &EnvironmentOptions::experimental_import_meta_resolve,
+            "experimental ES Module import.meta.resolve() parentURL support",
+            BOOL_FIELD(experimental_import_meta_resolve),
             kAllowedInEnvvar);
-  AddOption("--experimental-policy",
-            "use the specified file as a "
-            "security policy",
-            &EnvironmentOptions::experimental_policy,
-            kAllowedInEnvvar);
-  AddOption("[has_policy_integrity_string]",
-            "",
-            &EnvironmentOptions::has_policy_integrity_string);
-  AddOption("--policy-integrity",
-            "ensure the security policy contents match "
-            "the specified integrity",
-            &EnvironmentOptions::experimental_policy_integrity,
-            kAllowedInEnvvar);
-  Implies("--policy-integrity", "[has_policy_integrity_string]");
-  AddOption("--experimental-repl-await",
-            "experimental await keyword support in REPL",
-            &EnvironmentOptions::experimental_repl_await,
+  AddOption("--permission",
+            "enable the permission system",
+            BOOL_FIELD(permission),
             kAllowedInEnvvar,
-            true);
+            false,
+            OptionNamespaces::kPermissionNamespace);
+  AddOption("--permission-audit",
+            "enable audit only for the permission system",
+            BOOL_FIELD(permission_audit),
+            kAllowedInEnvvar,
+            false);
+  AddOption("--allow-env",
+            "allow access to environment variables when any permissions are "
+            "set",
+            &EnvironmentOptions::allow_env,
+            kAllowedInEnvvar,
+            OptionNamespaces::kPermissionNamespace);
+  AddOption("--allow-fs-read",
+            "allow permissions to read the filesystem",
+            &EnvironmentOptions::allow_fs_read,
+            kAllowedInEnvvar,
+            OptionNamespaces::kPermissionNamespace);
+  AddOption("--allow-fs-write",
+            "allow permissions to write in the filesystem",
+            &EnvironmentOptions::allow_fs_write,
+            kAllowedInEnvvar,
+            OptionNamespaces::kPermissionNamespace);
+  AddOption("--allow-fs-vfs",
+            "allow mounting a virtual file system when any permissions are set",
+            BOOL_FIELD(allow_fs_vfs),
+            kAllowedInEnvvar,
+            false,
+            OptionNamespaces::kPermissionNamespace);
+  AddOption("--allow-addons",
+            "allow use of addons when any permissions are set",
+            BOOL_FIELD(allow_addons),
+            kAllowedInEnvvar,
+            false,
+            OptionNamespaces::kPermissionNamespace);
+  AddOption("--allow-child-process",
+            "allow use of child process when any permissions are set",
+            BOOL_FIELD(allow_child_process),
+            kAllowedInEnvvar,
+            false,
+            OptionNamespaces::kPermissionNamespace);
+#if HAVE_FFI
+  AddOption("--allow-ffi",
+            "allow use of FFI when any permissions are set",
+            BOOL_FIELD(allow_ffi),
+            kAllowedInEnvvar,
+            false,
+            OptionNamespaces::kPermissionNamespace);
+#endif  // HAVE_FFI
+  AddOption("--allow-inspector",
+            "allow use of inspector when any permissions are set",
+            BOOL_FIELD(allow_inspector),
+            kAllowedInEnvvar,
+            false,
+            OptionNamespaces::kPermissionNamespace);
+  AddOption("--allow-net",
+            "allow use of network when any permissions are set",
+            BOOL_FIELD(allow_net),
+            kAllowedInEnvvar,
+            false,
+            OptionNamespaces::kPermissionNamespace);
+  AddOption("--allow-wasi",
+            "allow wasi when any permissions are set",
+            BOOL_FIELD(allow_wasi),
+            kAllowedInEnvvar,
+            false,
+            OptionNamespaces::kPermissionNamespace);
+  AddOption("--allow-worker",
+            "allow worker threads when any permissions are set",
+            BOOL_FIELD(allow_worker_threads),
+            kAllowedInEnvvar,
+            false,
+            OptionNamespaces::kPermissionNamespace);
+  AddOption("--allow-openssl-store",
+            "allow use of OpenSSL STORE loaders when any permissions are set",
+            BOOL_FIELD(allow_openssl_store),
+            kAllowedInEnvvar,
+            false,
+            OptionNamespaces::kPermissionNamespace);
+  AddOption("--experimental-repl-await", "", NoOp{}, kAllowedInEnvvar);
   AddOption("--experimental-vm-modules",
             "experimental ES Module support in vm module",
-            &EnvironmentOptions::experimental_vm_modules,
+            BOOL_FIELD(experimental_vm_modules),
             kAllowedInEnvvar);
   AddOption("--experimental-worker", "", NoOp{}, kAllowedInEnvvar);
   AddOption("--experimental-report", "", NoOp{}, kAllowedInEnvvar);
-  AddOption("--experimental-wasi-unstable-preview1",
-            "experimental WASI support",
-            &EnvironmentOptions::experimental_wasi,
-            kAllowedInEnvvar);
-  AddOption("--expose-internals", "", &EnvironmentOptions::expose_internals);
+  AddOption(
+      "--experimental-wasi-unstable-preview1", "", NoOp{}, kAllowedInEnvvar);
+  AddOption("--expose-gc", "expose gc extension", V8Option{}, kAllowedInEnvvar);
+  AddOption("--expose-internals", "", BOOL_FIELD(expose_internals));
   AddOption("--frozen-intrinsics",
             "experimental frozen intrinsics support",
-            &EnvironmentOptions::frozen_intrinsics,
+            BOOL_FIELD(frozen_intrinsics),
             kAllowedInEnvvar);
   AddOption("--heapsnapshot-signal",
             "Generate heap snapshot on specified signal",
@@ -432,11 +981,11 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
   AddOption("--http-parser", "", NoOp{}, kAllowedInEnvvar);
   AddOption("--insecure-http-parser",
             "use an insecure HTTP parser that accepts invalid HTTP headers",
-            &EnvironmentOptions::insecure_http_parser,
+            BOOL_FIELD(insecure_http_parser),
             kAllowedInEnvvar);
   AddOption("--input-type",
             "set module type for string input",
-            &EnvironmentOptions::module_type,
+            &EnvironmentOptions::input_type,
             kAllowedInEnvvar);
   AddOption(
       "--experimental-specifier-resolution", "", NoOp{}, kAllowedInEnvvar);
@@ -444,95 +993,125 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
            "--experimental-specifier-resolution");
   AddOption("--deprecation",
             "silence deprecation warnings",
-            &EnvironmentOptions::deprecation,
+            BOOL_FIELD(deprecation),
             kAllowedInEnvvar,
             true);
   AddOption("--force-async-hooks-checks",
             "disable checks for async_hooks",
-            &EnvironmentOptions::force_async_hooks_checks,
+            BOOL_FIELD(force_async_hooks_checks),
             kAllowedInEnvvar,
             true);
   AddOption(
       "--force-node-api-uncaught-exceptions-policy",
       "enforces 'uncaughtException' event on Node API asynchronous callbacks",
-      &EnvironmentOptions::force_node_api_uncaught_exceptions_policy,
+      BOOL_FIELD(force_node_api_uncaught_exceptions_policy),
       kAllowedInEnvvar,
       false);
   AddOption("--addons",
             "disable loading native addons",
-            &EnvironmentOptions::allow_native_addons,
+            BOOL_FIELD(allow_native_addons),
             kAllowedInEnvvar,
             true);
   AddOption("--global-search-paths",
             "disable global module search paths",
-            &EnvironmentOptions::global_search_paths,
+            BOOL_FIELD(global_search_paths),
             kAllowedInEnvvar,
             true);
   AddOption("--warnings",
             "silence all process warnings",
-            &EnvironmentOptions::warnings,
+            BOOL_FIELD(warnings),
             kAllowedInEnvvar,
             true);
+  AddOption("--disable-warning",
+            "silence specific process warnings",
+            &EnvironmentOptions::disable_warnings,
+            kAllowedInEnvvar);
   AddOption("--force-context-aware",
             "disable loading non-context-aware addons",
-            &EnvironmentOptions::force_context_aware,
+            BOOL_FIELD(force_context_aware),
             kAllowedInEnvvar);
   AddOption("--pending-deprecation",
             "emit pending deprecation warnings",
-            &EnvironmentOptions::pending_deprecation,
+            BOOL_FIELD(pending_deprecation),
+            kAllowedInEnvvar);
+  AddOption("--use-env-proxy",
+            "parse proxy settings from HTTP_PROXY/HTTPS_PROXY/NO_PROXY"
+            "environment variables and apply the setting in global HTTP/HTTPS "
+            "clients",
+            BOOL_FIELD(use_env_proxy),
             kAllowedInEnvvar);
   AddOption("--preserve-symlinks",
             "preserve symbolic links when resolving",
-            &EnvironmentOptions::preserve_symlinks,
+            BOOL_FIELD(preserve_symlinks),
             kAllowedInEnvvar);
   AddOption("--preserve-symlinks-main",
             "preserve symbolic links when resolving the main module",
-            &EnvironmentOptions::preserve_symlinks_main,
+            BOOL_FIELD(preserve_symlinks_main),
             kAllowedInEnvvar);
   AddOption("--prof",
             "Generate V8 profiler output.",
             V8Option{});
   AddOption("--prof-process",
             "process V8 profiler output generated using --prof",
-            &EnvironmentOptions::prof_process);
+            BOOL_FIELD(prof_process));
   // Options after --prof-process are passed through to the prof processor.
-  AddAlias("--prof-process", { "--prof-process", "--" });
+  AddAlias("--prof-process", {"--prof-process", "--"});
 #if HAVE_INSPECTOR
   AddOption("--cpu-prof",
             "Start the V8 CPU profiler on start up, and write the CPU profile "
             "to disk before exit. If --cpu-prof-dir is not specified, write "
             "the profile to the current working directory.",
-            &EnvironmentOptions::cpu_prof);
+            BOOL_FIELD(cpu_prof),
+            kAllowedInEnvvar);
   AddOption("--cpu-prof-name",
             "specified file name of the V8 CPU profile generated with "
             "--cpu-prof",
-            &EnvironmentOptions::cpu_prof_name);
+            &EnvironmentOptions::cpu_prof_name,
+            kAllowedInEnvvar);
   AddOption("--cpu-prof-interval",
             "specified sampling interval in microseconds for the V8 CPU "
             "profile generated with --cpu-prof. (default: 1000)",
-            &EnvironmentOptions::cpu_prof_interval);
+            &EnvironmentOptions::cpu_prof_interval,
+            kAllowedInEnvvar);
   AddOption("--cpu-prof-dir",
             "Directory where the V8 profiles generated by --cpu-prof will be "
             "placed. Does not affect --prof.",
-            &EnvironmentOptions::cpu_prof_dir);
+            &EnvironmentOptions::cpu_prof_dir,
+            kAllowedInEnvvar);
+  AddOption("--experimental-network-inspection",
+            "experimental network inspection support",
+            BOOL_FIELD(experimental_network_inspection));
+  AddOption("--experimental-storage-inspection",
+            "experimental storage inspection support",
+            BOOL_FIELD(experimental_storage_inspection));
+  AddOption("--experimental-worker-inspection",
+            "experimental worker inspection support",
+            BOOL_FIELD(experimental_worker_inspection));
+  AddOption("--experimental-inspector-network-resource",
+            "experimental load network resources via the inspector",
+            BOOL_FIELD(experimental_inspector_network_resource));
   AddOption(
       "--heap-prof",
       "Start the V8 heap profiler on start up, and write the heap profile "
       "to disk before exit. If --heap-prof-dir is not specified, write "
       "the profile to the current working directory.",
-      &EnvironmentOptions::heap_prof);
+      BOOL_FIELD(heap_prof),
+      kAllowedInEnvvar);
   AddOption("--heap-prof-name",
             "specified file name of the V8 heap profile generated with "
             "--heap-prof",
-            &EnvironmentOptions::heap_prof_name);
+            &EnvironmentOptions::heap_prof_name,
+            kAllowedInEnvvar);
   AddOption("--heap-prof-dir",
             "Directory where the V8 heap profiles generated by --heap-prof "
             "will be placed.",
-            &EnvironmentOptions::heap_prof_dir);
+            &EnvironmentOptions::heap_prof_dir,
+            kAllowedInEnvvar);
   AddOption("--heap-prof-interval",
             "specified sampling interval in bytes for the V8 heap "
             "profile generated with --heap-prof. (default: 512 * 1024)",
-            &EnvironmentOptions::heap_prof_interval);
+            &EnvironmentOptions::heap_prof_interval,
+            kAllowedInEnvvar);
 #endif  // HAVE_INSPECTOR
   AddOption("--max-http-header-size",
             "set the maximum size of HTTP headers (default: 16384 (16KB))",
@@ -542,54 +1121,297 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             "write warnings to file instead of stderr",
             &EnvironmentOptions::redirect_warnings,
             kAllowedInEnvvar);
+  AddOption("[has_env_file_string]", "", BOOL_FIELD(has_env_file_string));
+  AddOption("--env-file",
+            "set environment variables from supplied file",
+            &EnvironmentOptions::env_file);
+  Implies("--env-file", "[has_env_file_string]");
+  AddOption("--env-file-if-exists",
+            "set environment variables from supplied file",
+            &EnvironmentOptions::optional_env_file);
+  Implies("--env-file-if-exists", "[has_env_file_string]");
+  AddOption("--config-file",
+            "set config file path",
+            &EnvironmentOptions::config_file_path,
+            kDisallowedInEnvvar);
+  AddAlias("--experimental-config-file", "--config-file");
+  AddAlias("--experimental-default-config-file", "--config-file");
+  AddOption("--experimental-package-map",
+            "use the specified file for package map resolution",
+            &EnvironmentOptions::experimental_package_map_path,
+            kAllowedInEnvvar);
+  AddOption("[has_bench_options]", "", BOOL_FIELD(has_bench_options));
+  AddOption("--bench",
+            "launch benchmark runner on startup",
+            BOOL_FIELD(bench_runner),
+            kDisallowedInEnvvar,
+            false,
+            OptionNamespaces::kBenchRunnerNamespace);
+  Implies("--bench", "[has_bench_options]");
+  AddOption("--bench-isolation",
+            "configures the type of benchmark isolation used in the benchmark "
+            "runner",
+            &EnvironmentOptions::bench_isolation,
+            kAllowedInEnvvar,
+            OptionNamespaces::kBenchRunnerNamespace);
+  Implies("--bench-isolation", "[has_bench_options]");
+  AddOption("--bench-name-pattern",
+            "run benchmarks whose name matches this regular expression",
+            &EnvironmentOptions::bench_name_pattern,
+            kAllowedInEnvvar,
+            OptionNamespaces::kBenchRunnerNamespace);
+  Implies("--bench-name-pattern", "[has_bench_options]");
+  AddOption("--bench-reporter",
+            "report benchmark output using the given reporter",
+            &EnvironmentOptions::bench_reporter,
+            kAllowedInEnvvar,
+            OptionNamespaces::kBenchRunnerNamespace);
+  Implies("--bench-reporter", "[has_bench_options]");
+  AddOption("--bench-reporter-destination",
+            "report the given benchmark reporter to the given destination",
+            &EnvironmentOptions::bench_reporter_destination,
+            kAllowedInEnvvar,
+            OptionNamespaces::kBenchRunnerNamespace);
+  Implies("--bench-reporter-destination", "[has_bench_options]");
+  AddOption("[has_bench_samples]", "", BOOL_FIELD(has_bench_samples));
+  AddOption("--bench-samples",
+            "specify the number of measured benchmark samples",
+            &EnvironmentOptions::bench_samples,
+            kAllowedInEnvvar,
+            OptionNamespaces::kBenchRunnerNamespace,
+            kStrictOptionParsing);
+  Implies("--bench-samples", "[has_bench_options]");
+  Implies("--bench-samples", "[has_bench_samples]");
+  AddOption("[has_bench_warmup]", "", BOOL_FIELD(has_bench_warmup));
+  AddOption("--bench-warmup",
+            "specify the number of unreported benchmark warmup samples",
+            &EnvironmentOptions::bench_warmup,
+            kAllowedInEnvvar,
+            OptionNamespaces::kBenchRunnerNamespace,
+            kStrictOptionParsing);
+  Implies("--bench-warmup", "[has_bench_options]");
+  Implies("--bench-warmup", "[has_bench_warmup]");
   AddOption("--test",
             "launch test runner on startup",
-            &EnvironmentOptions::test_runner);
+            BOOL_FIELD(test_runner),
+            kDisallowedInEnvvar,
+            false,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-concurrency",
+            "specify test runner concurrency",
+            &EnvironmentOptions::test_runner_concurrency,
+            kDisallowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-force-exit",
+            "force test runner to exit upon completion",
+            BOOL_FIELD(test_runner_force_exit),
+            kDisallowedInEnvvar,
+            false,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-timeout",
+            "specify test runner timeout",
+            &EnvironmentOptions::test_runner_timeout,
+            kDisallowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-update-snapshots",
+            "regenerate test snapshots",
+            BOOL_FIELD(test_runner_update_snapshots),
+            kDisallowedInEnvvar,
+            false,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--experimental-test-coverage",
+            "enable code coverage in the test runner",
+            BOOL_FIELD(test_runner_coverage),
+            kDisallowedInEnvvar,
+            false,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-coverage-branches",
+            "the branch coverage minimum threshold",
+            &EnvironmentOptions::test_coverage_branches,
+            kAllowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-coverage-functions",
+            "the function coverage minimum threshold",
+            &EnvironmentOptions::test_coverage_functions,
+            kAllowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-coverage-lines",
+            "the line coverage minimum threshold",
+            &EnvironmentOptions::test_coverage_lines,
+            kAllowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-isolation",
+            "configures the type of test isolation used in the test runner",
+            &EnvironmentOptions::test_isolation,
+            kAllowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  // TODO(cjihrig): Remove this alias in a semver major.
+  AddAlias("--experimental-test-isolation", "--test-isolation");
+  AddOption("--experimental-test-module-mocks",
+            "enable module mocking in the test runner",
+            BOOL_FIELD(test_runner_module_mocks),
+            kDisallowedInEnvvar,
+            false,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--experimental-test-snapshots",
+            "",
+            NoOp{},
+            kDisallowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
   AddOption("--test-name-pattern",
             "run tests whose name matches this regular expression",
-            &EnvironmentOptions::test_name_pattern);
+            &EnvironmentOptions::test_name_pattern,
+            kAllowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-reporter",
+            "report test output using the given reporter",
+            &EnvironmentOptions::test_reporter,
+            kAllowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-reporter-destination",
+            "report given reporter to the given destination",
+            &EnvironmentOptions::test_reporter_destination,
+            kAllowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
   AddOption("--test-only",
             "run tests with 'only' option set",
-            &EnvironmentOptions::test_only,
-            kAllowedInEnvvar);
-  AddOption("--test-udp-no-try-send", "",  // For testing only.
-            &EnvironmentOptions::test_udp_no_try_send);
+            BOOL_FIELD(test_only),
+            kAllowedInEnvvar,
+            false,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-forbid-only",
+            "fail tests that use the 'only' option",
+            BOOL_FIELD(test_forbid_only),
+            kAllowedInEnvvar,
+            false,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-shard",
+            "run test at specific shard",
+            &EnvironmentOptions::test_shard,
+            kAllowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-skip-pattern",
+            "run tests whose name do not match this regular expression",
+            &EnvironmentOptions::test_skip_pattern,
+            kAllowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--experimental-test-tag-filter",
+            "run tests matching the given tag filter expression",
+            &EnvironmentOptions::experimental_test_tag_filter,
+            kDisallowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-coverage-include",
+            "include files in coverage report that match this glob pattern",
+            &EnvironmentOptions::coverage_include_pattern,
+            kAllowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-coverage-include-all",
+            "include source files that were never loaded in the coverage "
+            "report",
+            BOOL_FIELD(coverage_include_all),
+            kAllowedInEnvvar,
+            false,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-coverage-exclude",
+            "exclude files from coverage report that match this glob pattern",
+            &EnvironmentOptions::coverage_exclude_pattern,
+            kAllowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-global-setup",
+            "specifies the path to the global setup file",
+            &EnvironmentOptions::test_global_setup_path,
+            kAllowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-randomize",
+            "run tests in a random order",
+            BOOL_FIELD(test_randomize),
+            kAllowedInEnvvar,
+            false,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("[has_test_random_seed]", "", BOOL_FIELD(has_test_random_seed));
+  AddOption("--test-random-seed",
+            "seed used to randomize test execution order",
+            &EnvironmentOptions::test_random_seed,
+            kAllowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  Implies("--test-random-seed", "[has_test_random_seed]");
+  AddOption("--test-rerun-failures",
+            "specifies the path to the rerun state file",
+            &EnvironmentOptions::test_rerun_failures_path,
+            kAllowedInEnvvar,
+            OptionNamespaces::kTestRunnerNamespace);
+  AddOption("--test-udp-no-try-send",
+            "",  // For testing only.
+            BOOL_FIELD(test_udp_no_try_send),
+            kDisallowedInEnvvar);
   AddOption("--throw-deprecation",
             "throw an exception on deprecations",
-            &EnvironmentOptions::throw_deprecation,
-            kAllowedInEnvvar);
-  AddOption("--trace-atomics-wait",
-            "(deprecated) trace Atomics.wait() operations",
-            &EnvironmentOptions::trace_atomics_wait,
+            BOOL_FIELD(throw_deprecation),
             kAllowedInEnvvar);
   AddOption("--trace-deprecation",
             "show stack traces on deprecations",
-            &EnvironmentOptions::trace_deprecation,
+            BOOL_FIELD(trace_deprecation),
             kAllowedInEnvvar);
   AddOption("--trace-exit",
             "show stack trace when an environment exits",
-            &EnvironmentOptions::trace_exit,
+            BOOL_FIELD(trace_exit),
             kAllowedInEnvvar);
   AddOption("--trace-sync-io",
             "show stack trace when use of sync IO is detected after the "
             "first tick",
-            &EnvironmentOptions::trace_sync_io,
+            BOOL_FIELD(trace_sync_io),
             kAllowedInEnvvar);
   AddOption("--trace-tls",
             "prints TLS packet trace information to stderr",
-            &EnvironmentOptions::trace_tls,
+            BOOL_FIELD(trace_tls),
             kAllowedInEnvvar);
   AddOption("--trace-uncaught",
             "show stack traces for the `throw` behind uncaught exceptions",
-            &EnvironmentOptions::trace_uncaught,
+            BOOL_FIELD(trace_uncaught),
             kAllowedInEnvvar);
   AddOption("--trace-warnings",
             "show stack traces on process warnings",
-            &EnvironmentOptions::trace_warnings,
+            BOOL_FIELD(trace_warnings),
             kAllowedInEnvvar);
+  AddOption("--trace-promises",
+            "show stack traces on promise initialization and resolution",
+            BOOL_FIELD(trace_promises),
+            kAllowedInEnvvar);
+
+  AddOption("--trace-env",
+            "Print accesses to the environment variables",
+            BOOL_FIELD(trace_env),
+            kAllowedInEnvvar);
+  Implies("--trace-env-js-stack", "--trace-env");
+  Implies("--trace-env-native-stack", "--trace-env");
+  AddOption("--trace-env-js-stack",
+            "Print accesses to the environment variables and the JavaScript "
+            "stack trace",
+            BOOL_FIELD(trace_env_js_stack),
+            kAllowedInEnvvar);
+  AddOption(
+      "--trace-env-native-stack",
+      "Print accesses to the environment variables and the native stack trace",
+      BOOL_FIELD(trace_env_native_stack),
+      kAllowedInEnvvar);
+
+#if HAVE_OPENSSL
+  AddOption("--use-system-ca",
+            "use system's CA store",
+            BOOL_FIELD(use_system_ca),
+            kAllowedInEnvvar);
+#endif  // HAVE_OPENSSL
+
+  AddOption(
+      "--trace-require-module",
+      "Print access to require(esm). Options are 'all' (print all usage) and "
+      "'no-node-modules' (excluding usage from the node_modules folder)",
+      &EnvironmentOptions::trace_require_module,
+      kAllowedInEnvvar);
+
   AddOption("--extra-info-on-fatal-exception",
             "hide extra information on fatal exception that causes exit",
-            &EnvironmentOptions::extra_info_on_fatal_exception,
+            BOOL_FIELD(extra_info_on_fatal_exception),
             kAllowedInEnvvar,
             true);
   AddOption("--unhandled-rejections",
@@ -603,20 +1425,35 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             kAllowedInEnvvar);
   AddOption("--verify-base-objects",
             "", /* undocumented, only for debugging */
-            &EnvironmentOptions::verify_base_objects,
+            BOOL_FIELD(verify_base_objects),
             kAllowedInEnvvar);
   AddOption("--watch",
             "run in watch mode",
-            &EnvironmentOptions::watch_mode,
-            kAllowedInEnvvar);
+            BOOL_FIELD(watch_mode),
+            kAllowedInEnvvar,
+            false,
+            OptionNamespaces::kWatchNamespace);
   AddOption("--watch-path",
             "path to watch",
             &EnvironmentOptions::watch_mode_paths,
-            kAllowedInEnvvar);
+            kAllowedInEnvvar,
+            OptionNamespaces::kWatchNamespace);
+  AddOption("--watch-kill-signal",
+            "kill signal to send to the process on watch mode restarts"
+            "(default: SIGTERM)",
+            &EnvironmentOptions::watch_mode_kill_signal,
+            kAllowedInEnvvar,
+            OptionNamespaces::kWatchNamespace);
+  AddOption("--watch-preserve-output",
+            "preserve outputs on watch mode restart",
+            BOOL_FIELD(watch_mode_preserve_output),
+            kAllowedInEnvvar,
+            false,
+            OptionNamespaces::kWatchNamespace);
   Implies("--watch-path", "--watch");
   AddOption("--check",
             "syntax check script without executing",
-            &EnvironmentOptions::syntax_check_only);
+            BOOL_FIELD(syntax_check_only));
   AddAlias("-c", "--check");
   // This option is only so that we can tell --eval with an empty string from
   // no eval at all. Having it not start with a dash makes it inaccessible
@@ -624,12 +1461,11 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
   // TODO(addaleax): When moving --help over to something generated from the
   // programmatic descriptions, this will need some special care.
   // (See also [ssl_openssl_cert_store] below.)
-  AddOption("[has_eval_string]", "", &EnvironmentOptions::has_eval_string);
+  AddOption("[has_eval_string]", "", BOOL_FIELD(has_eval_string));
   AddOption("--eval", "evaluate script", &EnvironmentOptions::eval_string);
   Implies("--eval", "[has_eval_string]");
-  AddOption("--print",
-            "evaluate script and print result",
-            &EnvironmentOptions::print_eval);
+  AddOption(
+      "--print", "evaluate script and print result", BOOL_FIELD(print_eval));
   AddAlias("-e", "--eval");
   AddAlias("--print <arg>", "-pe");
   AddAlias("-pe", { "--print", "--eval" });
@@ -643,16 +1479,22 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             "ES module to preload (option can be repeated)",
             &EnvironmentOptions::preload_esm_modules,
             kAllowedInEnvvar);
+  AddOption("--strip-types",
+            "Type-stripping for TypeScript files.",
+            BOOL_FIELD(strip_types),
+            kAllowedInEnvvar,
+            HAVE_AMARO);
+  AddAlias("--experimental-strip-types", "--strip-types");
+  AddOption("--experimental-strip-private-modules",
+            "Type-stripping for TypeScript files under node_modules "
+            "belonging to packages marked \"private\": true",
+            BOOL_FIELD(experimental_strip_private_modules),
+            kAllowedInEnvvar);
   AddOption("--interactive",
             "always enter the REPL even if stdin does not appear "
             "to be a terminal",
-            &EnvironmentOptions::force_repl);
+            BOOL_FIELD(force_repl));
   AddAlias("-i", "--interactive");
-
-  AddOption("--update-assert-snapshot",
-            "update assert snapshot files",
-            &EnvironmentOptions::update_assert_snapshot,
-            kAllowedInEnvvar);
 
   AddOption("--napi-modules", "", NoOp{}, kAllowedInEnvvar);
 
@@ -663,23 +1505,23 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
 
   AddOption("--tls-min-v1.0",
             "set default TLS minimum to TLSv1.0 (default: TLSv1.2)",
-            &EnvironmentOptions::tls_min_v1_0,
+            BOOL_FIELD(tls_min_v1_0),
             kAllowedInEnvvar);
   AddOption("--tls-min-v1.1",
             "set default TLS minimum to TLSv1.1 (default: TLSv1.2)",
-            &EnvironmentOptions::tls_min_v1_1,
+            BOOL_FIELD(tls_min_v1_1),
             kAllowedInEnvvar);
   AddOption("--tls-min-v1.2",
             "set default TLS minimum to TLSv1.2 (default: TLSv1.2)",
-            &EnvironmentOptions::tls_min_v1_2,
+            BOOL_FIELD(tls_min_v1_2),
             kAllowedInEnvvar);
   AddOption("--tls-min-v1.3",
             "set default TLS minimum to TLSv1.3 (default: TLSv1.2)",
-            &EnvironmentOptions::tls_min_v1_3,
+            BOOL_FIELD(tls_min_v1_3),
             kAllowedInEnvvar);
   AddOption("--tls-max-v1.2",
             "set default TLS maximum to TLSv1.2 (default: TLSv1.3)",
-            &EnvironmentOptions::tls_max_v1_2,
+            BOOL_FIELD(tls_max_v1_2),
             kAllowedInEnvvar);
   // Current plan is:
   // - 11.x and below: TLS1.3 is opt-in with --tls-max-v1.3
@@ -687,15 +1529,32 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
   // In either case, support both options they are uniformly available.
   AddOption("--tls-max-v1.3",
             "set default TLS maximum to TLSv1.3 (default: TLSv1.3)",
-            &EnvironmentOptions::tls_max_v1_3,
+            BOOL_FIELD(tls_max_v1_3),
+            kAllowedInEnvvar);
+
+  AddOption("--report-exclude-env",
+            "Exclude environment variables when generating report"
+            " (default: false)",
+            BOOL_FIELD(report_exclude_env),
+            kAllowedInEnvvar);
+  AddOption("--report-exclude-network",
+            "exclude network interface diagnostics."
+            " (default: false)",
+            BOOL_FIELD(report_exclude_network),
             kAllowedInEnvvar);
 }
 
 PerIsolateOptionsParser::PerIsolateOptionsParser(
   const EnvironmentOptionsParser& eop) {
+  AddOption("--worker-snapshot",
+            "start worker threads from the bootstrapped context in the "
+            "built-in startup snapshot",
+            BOOL_FIELD(worker_snapshot),
+            kAllowedInEnvvar,
+            true);
   AddOption("--track-heap-objects",
             "track heap object allocations for heap snapshots",
-            &PerIsolateOptions::track_heap_objects,
+            BOOL_FIELD(track_heap_objects),
             kAllowedInEnvvar);
 
   // Explicitly add some V8 flags to mark them as allowed in NODE_OPTIONS.
@@ -708,21 +1567,25 @@ PerIsolateOptionsParser::PerIsolateOptionsParser(
             "help system profilers to translate JavaScript interpreted frames",
             V8Option{},
             kAllowedInEnvvar);
+  AddOption("--max-heap-size", "", V8Option{}, kAllowedInEnvvar);
   AddOption("--max-old-space-size", "", V8Option{}, kAllowedInEnvvar);
+  AddOption("--max-old-space-size-percentage",
+            "set V8's max old space size as a percentage of available memory "
+            "(e.g., '50%'). Takes precedence over --max-old-space-size.",
+            &PerIsolateOptions::max_old_space_size_percentage,
+            kAllowedInEnvvar);
   AddOption("--max-semi-space-size", "", V8Option{}, kAllowedInEnvvar);
   AddOption("--perf-basic-prof", "", V8Option{}, kAllowedInEnvvar);
   AddOption(
       "--perf-basic-prof-only-functions", "", V8Option{}, kAllowedInEnvvar);
   AddOption("--perf-prof", "", V8Option{}, kAllowedInEnvvar);
   AddOption("--perf-prof-unwinding-info", "", V8Option{}, kAllowedInEnvvar);
-  AddOption("--stack-trace-limit", "", V8Option{}, kAllowedInEnvvar);
+  AddOption("--stack-trace-limit",
+            "",
+            &PerIsolateOptions::stack_trace_limit,
+            kAllowedInEnvvar);
   AddOption("--disallow-code-generation-from-strings",
             "disallow eval and friends",
-            V8Option{},
-            kAllowedInEnvvar);
-  AddOption("--huge-max-old-generation-size",
-            "increase default maximum heap size on machines with 16GB memory "
-            "or more",
             V8Option{},
             kAllowedInEnvvar);
   AddOption("--jitless",
@@ -731,11 +1594,11 @@ PerIsolateOptionsParser::PerIsolateOptionsParser(
             kAllowedInEnvvar);
   AddOption("--report-uncaught-exception",
             "generate diagnostic report on uncaught exceptions",
-            &PerIsolateOptions::report_uncaught_exception,
+            BOOL_FIELD(report_uncaught_exception),
             kAllowedInEnvvar);
   AddOption("--report-on-signal",
             "generate diagnostic report upon receiving signals",
-            &PerIsolateOptions::report_on_signal,
+            BOOL_FIELD(report_on_signal),
             kAllowedInEnvvar);
   AddOption("--report-signal",
             "causes diagnostic report to be produced on provided signal,"
@@ -743,17 +1606,31 @@ PerIsolateOptionsParser::PerIsolateOptionsParser(
             &PerIsolateOptions::report_signal,
             kAllowedInEnvvar);
   Implies("--report-signal", "--report-on-signal");
+  AddOption("--enable-etw-stack-walking",
+            "provides heap data to ETW Windows native tracing",
+            V8Option{},
+            kAllowedInEnvvar);
 
   AddOption("--experimental-top-level-await", "", NoOp{}, kAllowedInEnvvar);
 
   AddOption("--experimental-shadow-realm",
             "",
-            &PerIsolateOptions::experimental_shadow_realm,
+            BOOL_FIELD(experimental_shadow_realm),
             kAllowedInEnvvar);
   AddOption("--harmony-shadow-realm", "", V8Option{});
   Implies("--experimental-shadow-realm", "--harmony-shadow-realm");
   Implies("--harmony-shadow-realm", "--experimental-shadow-realm");
   ImpliesNot("--no-harmony-shadow-realm", "--experimental-shadow-realm");
+  AddOption("--build-snapshot",
+            "Generate a snapshot blob when the process exits.",
+            BOOL_FIELD(build_snapshot),
+            kDisallowedInEnvvar);
+  AddOption("--build-snapshot-config",
+            "Generate a snapshot blob when the process exits using a"
+            "JSON configuration in the specified path.",
+            &PerIsolateOptions::build_snapshot_config,
+            kDisallowedInEnvvar);
+  Implies("--build-snapshot-config", "--build-snapshot");
 
   Insert(eop, &PerIsolateOptions::get_per_env_options);
 }
@@ -780,26 +1657,20 @@ PerProcessOptionsParser::PerProcessOptionsParser(
             &PerProcessOptions::v8_thread_pool_size,
             kAllowedInEnvvar);
   AddOption("--zero-fill-buffers",
-            "automatically zero-fill all newly allocated Buffer and "
-            "SlowBuffer instances",
-            &PerProcessOptions::zero_fill_all_buffers,
+            "automatically zero-fill all newly allocated Buffer instances",
+            BOOL_FIELD(zero_fill_all_buffers),
             kAllowedInEnvvar);
   AddOption("--debug-arraybuffer-allocations",
             "", /* undocumented, only for debugging */
-            &PerProcessOptions::debug_arraybuffer_allocations,
+            BOOL_FIELD(debug_arraybuffer_allocations),
             kAllowedInEnvvar);
   AddOption("--disable-proto",
             "disable Object.prototype.__proto__",
             &PerProcessOptions::disable_proto,
             kAllowedInEnvvar);
-  AddOption("--build-snapshot",
-            "Generate a snapshot blob when the process exits."
-            " Currently only supported in the node_mksnapshot binary.",
-            &PerProcessOptions::build_snapshot,
-            kDisallowedInEnvvar);
   AddOption("--node-snapshot",
             "",  // It's a debug-only option.
-            &PerProcessOptions::node_snapshot,
+            BOOL_FIELD(node_snapshot),
             kAllowedInEnvvar);
   AddOption("--snapshot-blob",
             "Path to the snapshot blob that's either the result of snapshot"
@@ -815,20 +1686,18 @@ PerProcessOptionsParser::PerProcessOptionsParser(
   AddAlias("--security-reverts", "--security-revert");
   AddOption("--completion-bash",
             "print source-able bash completion script",
-            &PerProcessOptions::print_bash_completion);
-  AddOption("--help",
-            "print node command line options",
-            &PerProcessOptions::print_help);
-  AddAlias("-h", "--help");
+            BOOL_FIELD(print_bash_completion));
   AddOption(
-      "--version", "print Node.js version", &PerProcessOptions::print_version);
+      "--help", "print node command line options", BOOL_FIELD(print_help));
+  AddAlias("-h", "--help");
+  AddOption("--version", "print Node.js version", BOOL_FIELD(print_version));
   AddAlias("-v", "--version");
   AddOption("--v8-options",
             "print V8 command line options",
-            &PerProcessOptions::print_v8_help);
+            BOOL_FIELD(print_v8_help));
   AddOption("--report-compact",
             "output compact single-line JSON",
-            &PerProcessOptions::report_compact,
+            BOOL_FIELD(report_compact),
             kAllowedInEnvvar);
   AddOption("--report-dir",
             "define custom report pathname."
@@ -843,8 +1712,11 @@ PerProcessOptionsParser::PerProcessOptionsParser(
             kAllowedInEnvvar);
   AddOption("--report-on-fatalerror",
             "generate diagnostic report on fatal (internal) errors",
-            &PerProcessOptions::report_on_fatalerror,
+            BOOL_FIELD(report_on_fatalerror),
             kAllowedInEnvvar);
+  AddOption("--report-on-process-timeout",
+            "generate diagnostic report when --process-timeout expires",
+            BOOL_FIELD(report_on_process_timeout));
 
 #ifdef NODE_HAVE_I18N_SUPPORT
   AddOption("--icu-data-dir",
@@ -873,7 +1745,7 @@ PerProcessOptionsParser::PerProcessOptionsParser(
             " (default)"
 #endif
             ,
-            &PerProcessOptions::use_openssl_ca,
+            BOOL_FIELD(use_openssl_ca),
             kAllowedInEnvvar);
   AddOption("--use-bundled-ca",
             "use bundled CA store"
@@ -881,24 +1753,33 @@ PerProcessOptionsParser::PerProcessOptionsParser(
             " (default)"
 #endif
             ,
-            &PerProcessOptions::use_bundled_ca,
+            BOOL_FIELD(use_bundled_ca),
             kAllowedInEnvvar);
   // Similar to [has_eval_string] above, except that the separation between
   // this and use_openssl_ca only exists for option validation after parsing.
   // This is not ideal.
-  AddOption("[ssl_openssl_cert_store]",
-            "",
-            &PerProcessOptions::ssl_openssl_cert_store);
+  AddOption("[ssl_openssl_cert_store]", "", BOOL_FIELD(ssl_openssl_cert_store));
   Implies("--use-openssl-ca", "[ssl_openssl_cert_store]");
   ImpliesNot("--use-bundled-ca", "[ssl_openssl_cert_store]");
   AddOption("--enable-fips",
             "enable FIPS crypto at startup",
-            &PerProcessOptions::enable_fips_crypto,
+            BOOL_FIELD(enable_fips_crypto),
+            kAllowedInEnvvar);
+  AddOption("--enable-fips-indicator-events",
+            "publish FIPS indicator results to the "
+            "crypto.fips.indicator diagnostics channel",
+            BOOL_FIELD(enable_fips_indicator_events),
             kAllowedInEnvvar);
   AddOption("--force-fips",
-            "force FIPS crypto (cannot be disabled)",
-            &PerProcessOptions::force_fips_crypto,
+            "force FIPS crypto (optional mode: provider or strict)",
+            BOOL_FIELD(force_fips_crypto),
             kAllowedInEnvvar);
+  AddOption("[force_fips_crypto_policy]",
+            "",
+            &PerProcessOptions::force_fips_crypto_policy,
+            kAllowedInEnvvar);
+  AddAlias("--force-fips=", {"[force_fips_crypto_policy]", "--force-fips"});
+#ifndef V8_ENABLE_SANDBOX
   AddOption("--secure-heap",
             "total size of the OpenSSL secure heap",
             &PerProcessOptions::secure_heap,
@@ -907,30 +1788,35 @@ PerProcessOptionsParser::PerProcessOptionsParser(
             "minimum allocation size from the OpenSSL secure heap",
             &PerProcessOptions::secure_heap_min,
             kAllowedInEnvvar);
+#endif  // V8_ENABLE_SANDBOX
 #endif  // HAVE_OPENSSL
-#if OPENSSL_VERSION_MAJOR >= 3
+#if HAVE_OPENSSL && !defined(OPENSSL_IS_BORINGSSL)
   AddOption("--openssl-legacy-provider",
-            "enable OpenSSL 3.0 legacy provider",
-            &PerProcessOptions::openssl_legacy_provider,
+            "enable OpenSSL's legacy provider",
+            BOOL_FIELD(openssl_legacy_provider),
             kAllowedInEnvvar);
   AddOption("--openssl-shared-config",
             "enable OpenSSL shared configuration",
-            &PerProcessOptions::openssl_shared_config,
+            BOOL_FIELD(openssl_shared_config),
             kAllowedInEnvvar);
 
-#endif  // OPENSSL_VERSION_MAJOR
+#endif  // HAVE_OPENSSL && !OPENSSL_IS_BORINGSSL
   AddOption("--use-largepages",
-            "Map the Node.js static code to large pages. Options are "
-            "'off' (the default value, meaning do not map), "
-            "'on' (map and ignore failure, reporting it to stderr), "
-            "or 'silent' (map and silently ignore failure)",
+            "This option is no longer supported and a no-op. It still accepts"
+            " these values for compatibility: 'off' (default), 'on' (report a "
+            "warning to stderr), or 'silent' (same as 'off').",
             &PerProcessOptions::use_largepages,
             kAllowedInEnvvar);
 
   AddOption("--trace-sigint",
             "enable printing JavaScript stacktrace on SIGINT",
-            &PerProcessOptions::trace_sigint,
+            BOOL_FIELD(trace_sigint),
             kAllowedInEnvvar);
+
+  AddOption("--process-timeout",
+            "print why the process is still running and exit with code 124 "
+            "if it has not exited after the given duration (e.g. 30s)",
+            &PerProcessOptions::process_timeout);
 
   Insert(iop, &PerProcessOptions::get_per_isolate_options);
 
@@ -940,6 +1826,26 @@ PerProcessOptionsParser::PerProcessOptionsParser(
             kAllowedInEnvvar);
   Implies("--node-memory-debug", "--debug-arraybuffer-allocations");
   Implies("--node-memory-debug", "--verify-base-objects");
+
+  AddOption("--experimental-sea-config",
+            "Generate a blob that can be embedded into the single executable "
+            "application",
+            &PerProcessOptions::experimental_sea_config);
+
+  AddOption("--run",
+            "Run a script specified in package.json",
+            &PerProcessOptions::run);
+  AddOption(
+      "--disable-wasm-trap-handler",
+      "Disable trap-handler-based WebAssembly bound checks. V8 will insert "
+      "inline bound checks when compiling WebAssembly which may slow down "
+      "performance.",
+      BOOL_FIELD(disable_wasm_trap_handler),
+      kAllowedInEnvvar);
+
+  AddOption("--build-sea",
+            "Build a Node.js single executable application",
+            &PerProcessOptions::build_sea);
 }
 
 inline std::string RemoveBrackets(const std::string& host) {
@@ -949,17 +1855,17 @@ inline std::string RemoveBrackets(const std::string& host) {
     return host;
 }
 
-inline int ParseAndValidatePort(const std::string& port,
-                                std::vector<std::string>* errors) {
-  char* endptr;
-  errno = 0;
-  const unsigned long result =                 // NOLINT(runtime/int)
-    strtoul(port.c_str(), &endptr, 10);
-  if (errno != 0 || *endptr != '\0'||
-      (result != 0 && result < 1024) || result > 65535) {
-    errors->push_back(" must be 0 or in range 1024 to 65535.");
+inline uint16_t ParseAndValidatePort(const std::string_view port,
+                                     std::vector<std::string>* errors) {
+  uint16_t result{};
+  auto r = std::from_chars(port.data(), port.data() + port.size(), result);
+
+  if (r.ec == std::errc::result_out_of_range ||
+      (result != 0 && result < 1024)) {
+    errors->push_back("must be 0 or in range 1024 to 65535.");
   }
-  return static_cast<int>(result);
+
+  return result;
 }
 
 HostPort SplitHostPort(const std::string& arg,
@@ -1024,61 +1930,156 @@ std::string GetBashCompletion() {
   return out.str();
 }
 
+std::unordered_map<std::string, options_parser::OptionMappingDetails>
+MapEnvOptionsFlagInputType() {
+  std::unordered_map<std::string, options_parser::OptionMappingDetails>
+      type_map;
+  const auto& parser = _ppop_instance;
+  for (const auto& item : parser.options_) {
+    if (!item.first.empty() && !item.first.starts_with('[') &&
+        item.second.env_setting == kAllowedInEnvvar) {
+      const auto mapping_details = options_parser::OptionMappingDetails{
+          item.second.type,
+          item.second.help_text,
+      };
+      type_map[item.first] = mapping_details;
+    }
+  }
+  return type_map;
+}
+
+std::vector<std::string> MapAvailableNamespaces() {
+  std::vector<std::string> namespaceNames;
+  auto availableNamespaces = AllNamespaces();
+  for (size_t i = 1; i < availableNamespaces.size(); i++) {
+    OptionNamespaces ns = availableNamespaces[i];
+    std::string ns_string = NamespaceEnumToString(ns);
+    if (!ns_string.empty()) {
+      namespaceNames.push_back(ns_string);
+    }
+  }
+
+  return namespaceNames;
+}
+
+std::unordered_map<std::string, options_parser::OptionMappingDetails>
+MapOptionsByNamespace(std::string namespace_name) {
+  std::unordered_map<std::string, options_parser::OptionMappingDetails>
+      type_map;
+  const auto& parser = _ppop_instance;
+  for (const auto& item : parser.options_) {
+    if (!item.first.empty() && !item.first.starts_with('[') &&
+        item.second.namespace_id == namespace_name) {
+      const auto mapping_details = options_parser::OptionMappingDetails{
+          item.second.type,
+          item.second.help_text,
+      };
+      type_map[item.first] = mapping_details;
+    }
+  }
+  return type_map;
+}
+
+std::unordered_map<
+    std::string,
+    std::unordered_map<std::string, options_parser::OptionMappingDetails>>
+MapNamespaceOptionsAssociations() {
+  std::vector<std::string> available_namespaces =
+      options_parser::MapAvailableNamespaces();
+  std::unordered_map<
+      std::string,
+      std::unordered_map<std::string, options_parser::OptionMappingDetails>>
+      namespace_option_mapping;
+  for (const std::string& available_namespace : available_namespaces) {
+    namespace_option_mapping[available_namespace] =
+        options_parser::MapOptionsByNamespace(available_namespace);
+  }
+  return namespace_option_mapping;
+}
+
+struct IterateCLIOptionsScope {
+  explicit IterateCLIOptionsScope(Environment* env) {
+    // Temporarily act as if the current Environment's/IsolateData's options
+    // were the default options, i.e. like they are the ones we'd access for
+    // global options parsing, so that all options are available from the main
+    // parser.
+    original_per_isolate = per_process::cli_options->per_isolate;
+    per_process::cli_options->per_isolate = env->isolate_data()->options();
+    original_per_env = per_process::cli_options->per_isolate->per_env;
+    per_process::cli_options->per_isolate->per_env = env->options();
+  }
+  ~IterateCLIOptionsScope() {
+    per_process::cli_options->per_isolate->per_env = original_per_env;
+    per_process::cli_options->per_isolate = original_per_isolate;
+  }
+  std::shared_ptr<node::EnvironmentOptions> original_per_env;
+  std::shared_ptr<node::PerIsolateOptions> original_per_isolate;
+};
+
 // Return a map containing all the options and their metadata as well
 // as the aliases
-void GetCLIOptions(const FunctionCallbackInfo<Value>& args) {
-  Mutex::ScopedLock lock(per_process::cli_options_mutex);
-  Environment* env = Environment::GetCurrent(args);
+void GetCLIOptionsValues(const FunctionCallbackInfo<Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  Local<Context> context = isolate->GetCurrentContext();
+  Environment* env = Environment::GetCurrent(context);
+
   if (!env->has_run_bootstrapping_code()) {
     // No code because this is an assertion.
-    return env->ThrowError(
-        "Should not query options before bootstrapping is done");
+    THROW_ERR_OPTIONS_BEFORE_BOOTSTRAPPING(
+        isolate, "Should not query options before bootstrapping is done");
   }
   env->set_has_serialized_options(true);
 
-  Isolate* isolate = env->isolate();
-  Local<Context> context = env->context();
+  Mutex::ScopedLock lock(per_process::cli_options_mutex);
+  IterateCLIOptionsScope s(env);
 
-  // Temporarily act as if the current Environment's/IsolateData's options were
-  // the default options, i.e. like they are the ones we'd access for global
-  // options parsing, so that all options are available from the main parser.
-  auto original_per_isolate = per_process::cli_options->per_isolate;
-  per_process::cli_options->per_isolate = env->isolate_data()->options();
-  auto original_per_env = per_process::cli_options->per_isolate->per_env;
-  per_process::cli_options->per_isolate->per_env = env->options();
-  auto on_scope_leave = OnScopeLeave([&]() {
-    per_process::cli_options->per_isolate->per_env = original_per_env;
-    per_process::cli_options->per_isolate = original_per_isolate;
-  });
+  LocalVector<Name> option_names(isolate);
+  LocalVector<Value> option_values(isolate);
+  option_names.reserve(_ppop_instance.options_.size() * 2);
+  option_values.reserve(_ppop_instance.options_.size() * 2);
 
-  Local<Map> options = Map::New(isolate);
-  if (options
-          ->SetPrototype(context, env->primordials_safe_map_prototype_object())
-          .IsNothing()) {
-    return;
-  }
+  Local<Value> undefined_value = Undefined(isolate);
+  Local<Value> null_value = Null(isolate);
 
   for (const auto& item : _ppop_instance.options_) {
     Local<Value> value;
     const auto& option_info = item.second;
     auto field = option_info.field;
     PerProcessOptions* opts = per_process::cli_options.get();
+
     switch (option_info.type) {
       case kNoOp:
       case kV8Option:
         // Special case for --abort-on-uncaught-exception which is also
         // respected by Node.js internals
         if (item.first == "--abort-on-uncaught-exception") {
-          value = Boolean::New(
-            isolate, original_per_env->abort_on_uncaught_exception);
+          value = Boolean::New(isolate,
+                               s.original_per_env->abort_on_uncaught_exception);
+        } else if (item.first == "--stack-trace-limit") {
+          value =
+              Number::New(isolate,
+                          static_cast<double>(
+                              *_ppop_instance.Lookup<int64_t>(field, opts)));
         } else {
-          value = Undefined(isolate);
+          value = undefined_value;
         }
         break;
-      case kBoolean:
-        value = Boolean::New(isolate,
-                             *_ppop_instance.Lookup<bool>(field, opts));
+      case kBoolean: {
+        bool original_value = field->GetBool(opts);
+        value = Boolean::New(isolate, original_value);
+
+        // Add --no-* entries.
+        std::string negated_name =
+            "--no" + item.first.substr(1, item.first.size());
+        Local<Value> negated_value = Boolean::New(isolate, !original_value);
+        Local<Value> negated_name_v8;
+        if (!ToV8Value(context, negated_name).ToLocal(&negated_name_v8)) {
+          return;
+        }
+        option_names.push_back(negated_name_v8.As<Name>());
+        option_values.push_back(negated_value);
         break;
+      }
       case kInteger:
         value = Number::New(
             isolate,
@@ -1105,46 +2106,88 @@ void GetCLIOptions(const FunctionCallbackInfo<Value>& args) {
         break;
       case kHostPort: {
         const HostPort& host_port =
-          *_ppop_instance.Lookup<HostPort>(field, opts);
-        Local<Object> obj = Object::New(isolate);
+            *_ppop_instance.Lookup<HostPort>(field, opts);
         Local<Value> host;
-        if (!ToV8Value(context, host_port.host()).ToLocal(&host) ||
-            obj->Set(context, env->host_string(), host).IsNothing() ||
-            obj->Set(context,
-                     env->port_string(),
-                     Integer::New(isolate, host_port.port()))
-                .IsNothing()) {
+        if (!ToV8Value(context, host_port.host()).ToLocal(&host)) {
           return;
         }
-        value = obj;
+        constexpr size_t kHostPortLength = 2;
+        std::array<Local<Name>, kHostPortLength> names = {env->host_string(),
+                                                          env->port_string()};
+        std::array<Local<Value>, kHostPortLength> values = {
+            host, Integer::New(isolate, host_port.port())};
+        value = Object::New(
+            isolate, null_value, names.data(), values.data(), kHostPortLength);
         break;
       }
       default:
         UNREACHABLE();
     }
     CHECK(!value.IsEmpty());
+    Local<Value> name;
+    if (!ToV8Value(context, item.first).ToLocal(&name)) {
+      return;
+    }
+    option_names.push_back(name.As<Name>());
+    option_values.push_back(value);
+  }
 
-    Local<Value> name = ToV8Value(context, item.first).ToLocalChecked();
-    Local<Object> info = Object::New(isolate);
+  Local<Object> options = Object::New(isolate,
+                                      null_value,
+                                      option_names.data(),
+                                      option_values.data(),
+                                      option_values.size());
+  args.GetReturnValue().Set(options);
+}
+
+void GetCLIOptionsInfo(const FunctionCallbackInfo<Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  Local<Context> context = isolate->GetCurrentContext();
+  Environment* env = Environment::GetCurrent(context);
+
+  if (!env->has_run_bootstrapping_code()) {
+    // No code because this is an assertion.
+    THROW_ERR_OPTIONS_BEFORE_BOOTSTRAPPING(
+        isolate, "Should not query options before bootstrapping is done");
+  }
+
+  Mutex::ScopedLock lock(per_process::cli_options_mutex);
+  IterateCLIOptionsScope s(env);
+
+  Local<Map> options = Map::New(isolate);
+  if (options
+          ->SetPrototype(context, env->primordials_safe_map_prototype_object())
+          .IsNothing()) {
+    return;
+  }
+
+  Local<Value> null_value = Null(isolate);
+  for (const auto& item : _ppop_instance.options_) {
+    const auto& option_info = item.second;
+    auto field = option_info.field;
+
+    Local<Value> name;
     Local<Value> help_text;
-    if (!ToV8Value(context, option_info.help_text).ToLocal(&help_text) ||
-        !info->Set(context, env->help_text_string(), help_text)
-             .FromMaybe(false) ||
-        !info->Set(context,
-                   env->env_var_settings_string(),
-                   Integer::New(isolate,
-                                static_cast<int>(option_info.env_setting)))
-             .FromMaybe(false) ||
-        !info->Set(context,
-                   env->type_string(),
-                   Integer::New(isolate, static_cast<int>(option_info.type)))
-             .FromMaybe(false) ||
-        !info->Set(context,
-                   env->default_is_true_string(),
-                   Boolean::New(isolate, option_info.default_is_true))
-             .FromMaybe(false) ||
-        info->Set(context, env->value_string(), value).IsNothing() ||
-        options->Set(context, name, info).IsEmpty()) {
+    if (!ToV8Value(context, item.first).ToLocal(&name) ||
+        !ToV8Value(context, option_info.help_text).ToLocal(&help_text)) {
+      return;
+    }
+    constexpr size_t kInfoSize = 4;
+    std::array<Local<Name>, kInfoSize> names = {
+        env->help_text_string(),
+        env->env_var_settings_string(),
+        env->type_string(),
+        env->default_is_true_string(),
+    };
+    std::array<Local<Value>, kInfoSize> values = {
+        help_text,
+        Integer::New(isolate, static_cast<int>(option_info.env_setting)),
+        Integer::New(isolate, static_cast<int>(option_info.type)),
+        Boolean::New(isolate, option_info.default_is_true),
+    };
+    Local<Object> info = Object::New(
+        isolate, null_value, names.data(), values.data(), kInfoSize);
+    if (options->Set(context, name, info).IsEmpty()) {
       return;
     }
   }
@@ -1158,12 +2201,12 @@ void GetCLIOptions(const FunctionCallbackInfo<Value>& args) {
     return;
   }
 
-  Local<Object> ret = Object::New(isolate);
-  if (ret->Set(context, env->options_string(), options).IsNothing() ||
-      ret->Set(context, env->aliases_string(), aliases).IsNothing()) {
-    return;
-  }
-
+  constexpr size_t kRetLength = 2;
+  std::array<Local<Name>, kRetLength> names = {env->options_string(),
+                                               env->aliases_string()};
+  std::array<Local<Value>, kRetLength> values = {options, aliases};
+  Local<Value> ret =
+      Object::New(isolate, null_value, names.data(), values.data(), kRetLength);
   args.GetReturnValue().Set(ret);
 }
 
@@ -1171,24 +2214,278 @@ void GetEmbedderOptions(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
   if (!env->has_run_bootstrapping_code()) {
     // No code because this is an assertion.
-    return env->ThrowError(
+    THROW_ERR_OPTIONS_BEFORE_BOOTSTRAPPING(
+        env->isolate(),
         "Should not query options before bootstrapping is done");
   }
   Isolate* isolate = args.GetIsolate();
-  Local<Context> context = env->context();
-  Local<Object> ret = Object::New(isolate);
 
-  if (ret->Set(context,
-           FIXED_ONE_BYTE_STRING(env->isolate(), "shouldNotRegisterESMLoader"),
-           Boolean::New(isolate, env->should_not_register_esm_loader()))
-      .IsNothing()) return;
+  constexpr size_t kOptionsSize = 4;
+  std::array<Local<Name>, kOptionsSize> names = {
+      FIXED_ONE_BYTE_STRING(env->isolate(), "shouldNotRegisterESMLoader"),
+      FIXED_ONE_BYTE_STRING(env->isolate(), "noGlobalSearchPaths"),
+      FIXED_ONE_BYTE_STRING(env->isolate(), "noBrowserGlobals"),
+      FIXED_ONE_BYTE_STRING(env->isolate(), "hasEmbedderPreload")};
 
-  if (ret->Set(context,
-           FIXED_ONE_BYTE_STRING(env->isolate(), "noGlobalSearchPaths"),
-           Boolean::New(isolate, env->no_global_search_paths()))
-      .IsNothing()) return;
+  std::array<Local<Value>, kOptionsSize> values = {
+      Boolean::New(isolate, env->should_not_register_esm_loader()),
+      Boolean::New(isolate, env->no_global_search_paths()),
+      Boolean::New(isolate, env->no_browser_globals()),
+      Boolean::New(isolate, env->embedder_preload() != nullptr)};
+
+  Local<Object> ret = Object::New(
+      isolate, Null(isolate), names.data(), values.data(), kOptionsSize);
 
   args.GetReturnValue().Set(ret);
+}
+
+// This function returns an object containing all the options available
+// as NODE_OPTIONS and their metadata (input type and help text)
+// Example --experimental-transform metadata:
+// { type: kBoolean, help_text: "..." }
+// This is used to determine the type of the input for each option
+// to generate the config file json schema
+void GetEnvOptionsInputType(const FunctionCallbackInfo<Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  Local<Context> context = isolate->GetCurrentContext();
+  Environment* env = Environment::GetCurrent(context);
+
+  if (!env->has_run_bootstrapping_code()) {
+    // No code because this is an assertion.
+    THROW_ERR_OPTIONS_BEFORE_BOOTSTRAPPING(
+        isolate, "Should not query options before bootstrapping is done");
+  }
+
+  Mutex::ScopedLock lock(per_process::cli_options_mutex);
+
+  Local<Object> options_metadata = Object::New(isolate);
+
+  for (const auto& item : _ppop_instance.options_) {
+    if (!item.first.empty() && !item.first.starts_with('[') &&
+        item.second.env_setting == kAllowedInEnvvar) {
+      const auto mapping_details = options_parser::OptionMappingDetails{
+          item.second.type,
+          item.second.help_text,
+      };
+      if (!AddOptionTypeToObject(isolate,
+                                 context,
+                                 options_metadata,
+                                 item.first,
+                                 mapping_details)) {
+        return;
+      }
+    }
+  }
+  args.GetReturnValue().Set(options_metadata);
+}
+
+// This function returns a two-level nested map where:
+// - Keys are namespace names (e.g., "testRunner")
+// - Values are objects mapping option names to their metadata
+// This is used for config file JSON schema generation
+void GetNamespaceOptionsInputType(const FunctionCallbackInfo<Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  Local<Context> context = isolate->GetCurrentContext();
+  Environment* env = Environment::GetCurrent(context);
+
+  if (!env->has_run_bootstrapping_code()) {
+    // No code because this is an assertion.
+    THROW_ERR_OPTIONS_BEFORE_BOOTSTRAPPING(
+        isolate, "Should not query options before bootstrapping is done");
+  }
+
+  Mutex::ScopedLock lock(per_process::cli_options_mutex);
+
+  Local<Map> namespaces_metadata = Map::New(isolate);
+
+  // Get the mapping of namespaces to their options and metadata
+  auto namespace_options = options_parser::MapNamespaceOptionsAssociations();
+
+  for (const auto& ns_entry : namespace_options) {
+    const std::string& namespace_name = ns_entry.first;
+    const auto& options_map = ns_entry.second;
+
+    Local<Object> options_metadata = Object::New(isolate);
+
+    for (const auto& opt_entry : options_map) {
+      const std::string& option_name = opt_entry.first;
+      const options_parser::OptionMappingDetails& option_details =
+          opt_entry.second;
+
+      if (!AddOptionTypeToObject(isolate,
+                                 context,
+                                 options_metadata,
+                                 option_name,
+                                 option_details)) {
+        return;
+      }
+    }
+
+    // Only add namespaces that have options
+    if (!options_metadata.IsEmpty()) {
+      Local<String> namespace_key;
+      if (!String::NewFromUtf8(isolate,
+                               namespace_name.data(),
+                               v8::NewStringType::kNormal,
+                               namespace_name.size())
+               .ToLocal(&namespace_key)) {
+        continue;
+      }
+
+      if (namespaces_metadata->Set(context, namespace_key, options_metadata)
+              .IsEmpty()) {
+        return;
+      }
+    }
+  }
+
+  args.GetReturnValue().Set(namespaces_metadata);
+}
+
+// Return an array containing all currently active options as flag
+// strings from all sources (command line, NODE_OPTIONS, config file)
+void GetOptionsAsFlags(const FunctionCallbackInfo<Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  Local<Context> context = isolate->GetCurrentContext();
+  Environment* env = Environment::GetCurrent(context);
+
+  if (!env->has_run_bootstrapping_code()) {
+    // No code because this is an assertion.
+    THROW_ERR_OPTIONS_BEFORE_BOOTSTRAPPING(
+        isolate, "Should not query options before bootstrapping is done");
+  }
+  env->set_has_serialized_options(true);
+
+  Mutex::ScopedLock lock(per_process::cli_options_mutex);
+  IterateCLIOptionsScope s(env);
+
+  std::vector<std::string> flags;
+  PerProcessOptions* opts = per_process::cli_options.get();
+
+  for (const auto& item : _ppop_instance.options_) {
+    const std::string& option_name = item.first;
+    const auto& option_info = item.second;
+    auto field = option_info.field;
+
+    if (option_info.namespace_id ==
+            NamespaceEnumToString(OptionNamespaces::kBenchRunnerNamespace) &&
+        !opts->per_isolate->per_env->experimental_bench) {
+      continue;
+    }
+
+    // TODO(pmarchini): Skip internal options for the moment as probably not
+    // required
+    if (option_name.empty() || option_name.starts_with('[')) {
+      continue;
+    }
+
+    // Skip V8 options and NoOp options - only Node.js-specific options
+    if (option_info.type == kNoOp || option_info.type == kV8Option) {
+      continue;
+    }
+
+    switch (option_info.type) {
+      case kBoolean: {
+        bool current_value = field->GetBool(opts);
+#if HAVE_OPENSSL
+        if (option_name == "--force-fips" && current_value) {
+          flags.push_back(option_name + "=" + opts->force_fips_crypto_policy);
+          break;
+        }
+#endif
+        // For boolean options with default_is_true, we want the opposite logic
+        if (option_info.default_is_true) {
+          if (!current_value) {
+            // If default is true and current is false, add --no-* flag
+            flags.push_back("--no-" + option_name.substr(2));
+          }
+        } else {
+          if (current_value) {
+            // If default is false and current is true, add --flag
+            flags.push_back(option_name);
+          }
+        }
+        break;
+      }
+      case kInteger: {
+        int64_t current_value = *_ppop_instance.Lookup<int64_t>(field, opts);
+        flags.push_back(option_name + "=" + std::to_string(current_value));
+        break;
+      }
+      case kUInteger: {
+        uint64_t current_value = *_ppop_instance.Lookup<uint64_t>(field, opts);
+        flags.push_back(option_name + "=" + std::to_string(current_value));
+        break;
+      }
+      case kString: {
+        const std::string& current_value =
+            *_ppop_instance.Lookup<std::string>(field, opts);
+        // Only include if not empty
+        if (!current_value.empty()) {
+          flags.push_back(option_name + "=" + current_value);
+        }
+        break;
+      }
+      case kStringList: {
+        const std::vector<std::string>& current_values =
+            *_ppop_instance.Lookup<StringVector>(field, opts);
+        // Add each string in the list as a separate flag
+        for (const std::string& value : current_values) {
+          flags.push_back(option_name + "=" + value);
+        }
+        break;
+      }
+      case kHostPort: {
+        const HostPort& host_port =
+            *_ppop_instance.Lookup<HostPort>(field, opts);
+        // Only include if host is not empty or port is not default
+        if (!host_port.host().empty() || host_port.port() != 0) {
+          std::string host_port_str = host_port.host();
+          if (host_port.port() != 0) {
+            if (!host_port_str.empty()) {
+              host_port_str += ":";
+            }
+            host_port_str += std::to_string(host_port.port());
+          }
+          if (!host_port_str.empty()) {
+            flags.push_back(option_name + "=" + host_port_str);
+          }
+        }
+        break;
+      }
+      default:
+        // Skip unknown types
+        break;
+    }
+  }
+
+  Local<Value> result;
+  CHECK(ToV8Value(context, flags).ToLocal(&result));
+
+  args.GetReturnValue().Set(result);
+}
+
+void ParseNodeOptionsEnvVarBinding(const FunctionCallbackInfo<Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  Local<Context> context = isolate->GetCurrentContext();
+
+  Utf8Value node_options(isolate, args[0]);
+  std::string options_str(*node_options, node_options.length());
+
+  std::vector<std::string> errors;
+  std::vector<std::string> result =
+      ParseNodeOptionsEnvVar(options_str, &errors);
+
+  if (!errors.empty()) {
+    Environment* env = Environment::GetCurrent(context);
+    env->ThrowError(errors[0].c_str());
+    return;
+  }
+
+  Local<Value> v8_result;
+  if (ToV8Value(context, result).ToLocal(&v8_result)) {
+    args.GetReturnValue().Set(v8_result);
+  }
 }
 
 void Initialize(Local<Object> target,
@@ -1197,10 +2494,22 @@ void Initialize(Local<Object> target,
                 void* priv) {
   Environment* env = Environment::GetCurrent(context);
   Isolate* isolate = env->isolate();
-  SetMethodNoSideEffect(context, target, "getCLIOptions", GetCLIOptions);
+  SetMethodNoSideEffect(
+      context, target, "getCLIOptionsValues", GetCLIOptionsValues);
+  SetMethodNoSideEffect(
+      context, target, "getCLIOptionsInfo", GetCLIOptionsInfo);
+  SetMethodNoSideEffect(
+      context, target, "getOptionsAsFlags", GetOptionsAsFlags);
   SetMethodNoSideEffect(
       context, target, "getEmbedderOptions", GetEmbedderOptions);
-
+  SetMethodNoSideEffect(
+      context, target, "getEnvOptionsInputType", GetEnvOptionsInputType);
+  SetMethodNoSideEffect(context,
+                        target,
+                        "getNamespaceOptionsInputType",
+                        GetNamespaceOptionsInputType);
+  SetMethodNoSideEffect(
+      context, target, "parseNodeOptionsEnvVar", ParseNodeOptionsEnvVarBinding);
   Local<Object> env_settings = Object::New(isolate);
   NODE_DEFINE_CONSTANT(env_settings, kAllowedInEnvvar);
   NODE_DEFINE_CONSTANT(env_settings, kDisallowedInEnvvar);
@@ -1223,8 +2532,13 @@ void Initialize(Local<Object> target,
 }
 
 void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
-  registry->Register(GetCLIOptions);
+  registry->Register(GetCLIOptionsValues);
+  registry->Register(GetCLIOptionsInfo);
+  registry->Register(GetOptionsAsFlags);
   registry->Register(GetEmbedderOptions);
+  registry->Register(GetEnvOptionsInputType);
+  registry->Register(GetNamespaceOptionsInputType);
+  registry->Register(ParseNodeOptionsEnvVarBinding);
 }
 }  // namespace options_parser
 
@@ -1244,6 +2558,12 @@ void HandleEnvOptions(std::shared_ptr<EnvironmentOptions> env_options,
 
   env_options->preserve_symlinks_main =
       opt_getter("NODE_PRESERVE_SYMLINKS_MAIN") == "1";
+
+  env_options->use_env_proxy = opt_getter("NODE_USE_ENV_PROXY") == "1";
+
+#if HAVE_OPENSSL
+  env_options->use_system_ca = opt_getter("NODE_USE_SYSTEM_CA") == "1";
+#endif  // HAVE_OPENSSL
 
   if (env_options->redirect_warnings.empty())
     env_options->redirect_warnings = opt_getter("NODE_REDIRECT_WARNINGS");

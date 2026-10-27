@@ -1,5 +1,5 @@
 /*
- * Copyright 2020-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2020-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -12,17 +12,23 @@
 #include <openssl/core_names.h>
 #include <openssl/core_object.h>
 #include <openssl/params.h>
+#include <openssl/proverr.h>
 #include <openssl/x509.h>
+#include "internal/cryptlib.h"
 #include "internal/sizes.h"
 #include "crypto/x509.h"
 #include "crypto/ec.h"
 #include "prov/bio.h"
+#include "prov/decoders.h"
 #include "prov/implementations.h"
-#include "endecoder_local.h"
+#include "prov/endecoder_local.h"
+#include "providers/implementations/encode_decode/decode_spki2typespki.inc"
 
 static OSSL_FUNC_decoder_newctx_fn spki2typespki_newctx;
 static OSSL_FUNC_decoder_freectx_fn spki2typespki_freectx;
 static OSSL_FUNC_decoder_decode_fn spki2typespki_decode;
+static OSSL_FUNC_decoder_settable_ctx_params_fn spki2typespki_settable_ctx_params;
+static OSSL_FUNC_decoder_set_ctx_params_fn spki2typespki_set_ctx_params;
 
 /*
  * Context used for SubjectPublicKeyInfo to Type specific SubjectPublicKeyInfo
@@ -30,6 +36,7 @@ static OSSL_FUNC_decoder_decode_fn spki2typespki_decode;
  */
 struct spki2typespki_ctx_st {
     PROV_CTX *provctx;
+    char propq[OSSL_MAX_PROPQUERY_SIZE];
 };
 
 static void *spki2typespki_newctx(void *provctx)
@@ -48,27 +55,62 @@ static void spki2typespki_freectx(void *vctx)
     OPENSSL_free(ctx);
 }
 
-static int spki2typespki_decode(void *vctx, OSSL_CORE_BIO *cin, int selection,
-                                OSSL_CALLBACK *data_cb, void *data_cbarg,
-                                OSSL_PASSPHRASE_CALLBACK *pw_cb, void *pw_cbarg)
+static const OSSL_PARAM *spki2typespki_settable_ctx_params(ossl_unused void *provctx)
+{
+    return spki2typespki_set_ctx_params_list;
+}
+
+static int spki2typespki_set_ctx_params(void *vctx, const OSSL_PARAM params[])
 {
     struct spki2typespki_ctx_st *ctx = vctx;
-    unsigned char *der, *derp;
+    struct spki2typespki_set_ctx_params_st p;
+    char *str;
+
+    if (ctx == NULL || !spki2typespki_set_ctx_params_decoder(params, &p))
+        return 0;
+
+    str = ctx->propq;
+    if (p.propq != NULL
+        && !OSSL_PARAM_get_utf8_string(p.propq, &str, sizeof(ctx->propq)))
+        return 0;
+
+    return 1;
+}
+
+static int spki2typespki_decode(void *vctx, OSSL_CORE_BIO *cin, int selection,
+    OSSL_CALLBACK *data_cb, void *data_cbarg,
+    OSSL_PASSPHRASE_CALLBACK *pw_cb, void *pw_cbarg)
+{
+    struct spki2typespki_ctx_st *ctx = vctx;
+    unsigned char *der;
     long len;
     int ok = 0;
-    int objtype = OSSL_OBJECT_PKEY;
+
+    if (!ossl_read_der(ctx->provctx, cin, &der, &len))
+        return 1;
+
+    ok = ossl_spki2typespki_der_decode(der, len, selection, data_cb, data_cbarg,
+        pw_cb, pw_cbarg,
+        PROV_LIBCTX_OF(ctx->provctx), ctx->propq);
+    OPENSSL_free(der);
+    return ok;
+}
+
+int ossl_spki2typespki_der_decode(unsigned char *der, long len, int selection,
+    OSSL_CALLBACK *data_cb, void *data_cbarg,
+    OSSL_PASSPHRASE_CALLBACK *pw_cb, void *pw_cbarg,
+    OSSL_LIB_CTX *libctx, const char *propq)
+{
+    const unsigned char *derp = der;
     X509_PUBKEY *xpub = NULL;
     X509_ALGOR *algor = NULL;
     const ASN1_OBJECT *oid = NULL;
     char dataname[OSSL_MAX_NAME_SIZE];
-    OSSL_PARAM params[5], *p = params;
+    OSSL_PARAM params[6], *p = params;
+    int objtype = OSSL_OBJECT_PKEY;
+    int ok = 0;
 
-    if (!ossl_read_der(ctx->provctx, cin, &der, &len))
-        return 1;
-    derp = der;
-    xpub = ossl_d2i_X509_PUBKEY_INTERNAL((const unsigned char **)&derp, len,
-                                         PROV_LIBCTX_OF(ctx->provctx));
-
+    xpub = ossl_d2i_X509_PUBKEY_INTERNAL(&derp, len, libctx, propq);
 
     if (xpub == NULL) {
         /* We return "empty handed".  This is not an error. */
@@ -80,39 +122,52 @@ static int spki2typespki_decode(void *vctx, OSSL_CORE_BIO *cin, int selection,
         goto end;
     X509_ALGOR_get0(&oid, NULL, NULL, algor);
 
+    /*
+     * Resolve the SPKI AlgorithmIdentifier OID to the key type name expected
+     * by the downstream provider decoder.  Most OIDs map one-to-one to a key
+     * type via OBJ_obj2txt(), but a few need special handling:
+     *
+     *   - SM2 abuses id-ecPublicKey, so the EC parameters must be inspected
+     *     to tell EC and SM2 apart.
+     *   - TPM 1.2 Endorsement Key certificates use NID_rsaesOaep with a
+     *     plain RSAPublicKey body per TCG Credential Profiles V1.2 section
+     *     3.2.7; the OAEP AlgorithmIdentifier parameters are not interpreted
+     *     here.  Keep this in sync with x509_pubkey_decode() and
+     *     x509_pubkey_ex_d2i_ex() in crypto/x509/x_pubkey.c.
+     */
+    dataname[0] = '\0';
 #ifndef OPENSSL_NO_EC
-    /* SM2 abuses the EC oid, so this could actually be SM2 */
     if (OBJ_obj2nid(oid) == NID_X9_62_id_ecPublicKey
-            && ossl_x509_algor_is_sm2(algor))
-        strcpy(dataname, "SM2");
-    else
+        && ossl_x509_algor_is_sm2(algor))
+        OPENSSL_strlcpy(dataname, "SM2", sizeof(dataname));
 #endif
-    if (OBJ_obj2txt(dataname, sizeof(dataname), oid, 0) <= 0)
+    if (dataname[0] == '\0' && OBJ_obj2nid(oid) == NID_rsaesOaep)
+        OPENSSL_strlcpy(dataname, "RSA", sizeof(dataname));
+    if (dataname[0] == '\0'
+        && OBJ_obj2txt(dataname, sizeof(dataname), oid, 0) <= 0)
         goto end;
 
     ossl_X509_PUBKEY_INTERNAL_free(xpub);
     xpub = NULL;
 
-    *p++ =
-        OSSL_PARAM_construct_utf8_string(OSSL_OBJECT_PARAM_DATA_TYPE,
-                                            dataname, 0);
+    *p++ = OSSL_PARAM_construct_utf8_string(OSSL_OBJECT_PARAM_DATA_TYPE,
+        dataname, 0);
 
-    *p++ =
-        OSSL_PARAM_construct_utf8_string(OSSL_OBJECT_PARAM_DATA_STRUCTURE,
-                                            "SubjectPublicKeyInfo",
-                                            0);
-    *p++ =
-        OSSL_PARAM_construct_octet_string(OSSL_OBJECT_PARAM_DATA, der, len);
-    *p++ =
-        OSSL_PARAM_construct_int(OSSL_OBJECT_PARAM_TYPE, &objtype);
+    *p++ = OSSL_PARAM_construct_utf8_string(OSSL_OBJECT_PARAM_INPUT_TYPE,
+        "DER", 0);
+
+    *p++ = OSSL_PARAM_construct_utf8_string(OSSL_OBJECT_PARAM_DATA_STRUCTURE,
+        "SubjectPublicKeyInfo",
+        0);
+    *p++ = OSSL_PARAM_construct_octet_string(OSSL_OBJECT_PARAM_DATA, der, len);
+    *p++ = OSSL_PARAM_construct_int(OSSL_OBJECT_PARAM_TYPE, &objtype);
 
     *p = OSSL_PARAM_construct_end();
 
     ok = data_cb(params, data_cbarg);
 
- end:
+end:
     ossl_X509_PUBKEY_INTERNAL_free(xpub);
-    OPENSSL_free(der);
     return ok;
 }
 
@@ -120,5 +175,9 @@ const OSSL_DISPATCH ossl_SubjectPublicKeyInfo_der_to_der_decoder_functions[] = {
     { OSSL_FUNC_DECODER_NEWCTX, (void (*)(void))spki2typespki_newctx },
     { OSSL_FUNC_DECODER_FREECTX, (void (*)(void))spki2typespki_freectx },
     { OSSL_FUNC_DECODER_DECODE, (void (*)(void))spki2typespki_decode },
-    { 0, NULL }
+    { OSSL_FUNC_DECODER_SETTABLE_CTX_PARAMS,
+        (void (*)(void))spki2typespki_settable_ctx_params },
+    { OSSL_FUNC_DECODER_SET_CTX_PARAMS,
+        (void (*)(void))spki2typespki_set_ctx_params },
+    OSSL_DISPATCH_END
 };

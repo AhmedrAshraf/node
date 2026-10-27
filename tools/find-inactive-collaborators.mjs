@@ -11,11 +11,11 @@ import { parseArgs } from 'node:util';
 
 const args = parseArgs({
   allowPositionals: true,
-  options: { verbose: { type: 'boolean', short: 'v' } }
+  options: { verbose: { type: 'boolean', short: 'v' } },
 });
 
 const verbose = args.values.verbose;
-const SINCE = args.positionals[0] || '18 months ago';
+const SINCE = args.positionals[0] || '12 months ago';
 
 async function runGitCommand(cmd, mapFn) {
   const childProcess = cp.spawn('/bin/sh', ['-c', cmd], {
@@ -27,7 +27,7 @@ async function runGitCommand(cmd, mapFn) {
     input: childProcess.stdout,
   });
   const errorHandler = new Promise(
-    (_, reject) => childProcess.on('error', reject)
+    (_, reject) => childProcess.on('error', reject),
   );
   let returnValue = mapFn ? new Set() : '';
   await Promise.race([errorHandler, Promise.resolve()]);
@@ -47,16 +47,10 @@ async function runGitCommand(cmd, mapFn) {
   return Promise.race([errorHandler, Promise.resolve(returnValue)]);
 }
 
-// Get all commit authors during the time period.
-const authors = await runGitCommand(
-  `git shortlog -n -s --email --since="${SINCE}" HEAD`,
-  (line) => line.trim().split('\t', 2)[1]
-);
-
-// Get all approving reviewers of landed commits during the time period.
-const approvingReviewers = await runGitCommand(
-  `git log --since="${SINCE}" | egrep "^    Reviewed-By: "`,
-  (line) => /^ {4}Reviewed-By: ([^<]+)/.exec(line)[1].trim()
+// Get all commit contributors during the time period.
+const contributors = await runGitCommand(
+  `git log --pretty='format:%aN <%aE>%n%(trailers:only,valueonly,key=Co-authored-by)%n%(trailers:only,valueonly,key=Reviewed-by)' --since="${SINCE}" HEAD`,
+  String,
 );
 
 async function getCollaboratorsFromReadme() {
@@ -81,7 +75,7 @@ async function getCollaboratorsFromReadme() {
     if (line.startsWith('  **') && isCollaborator) {
       const [, name, email] = /^ {2}\*\*([^*]+)\*\* <<(.+)>>/.exec(line);
       const mailmap = await runGitCommand(
-        `git check-mailmap '${name} <${email}>'`
+        `git check-mailmap '${name} <${email}>'`,
       );
       if (mailmap !== `${name} <${email}>`) {
         console.log(`README entry for Collaborator does not match mailmap:\n  ${name} <${email}> => ${mailmap}`);
@@ -185,13 +179,11 @@ const collaborators = await getCollaboratorsFromReadme();
 
 if (verbose) {
   console.log(`Since ${SINCE}:\n`);
-  console.log(`* ${authors.size.toLocaleString()} authors have made commits.`);
-  console.log(`* ${approvingReviewers.size.toLocaleString()} reviewers have approved landed commits.`);
+  console.log(`* ${contributors.size.toLocaleString()} contributors`);
   console.log(`* ${collaborators.length.toLocaleString()} collaborators currently in the project.`);
 }
 const inactive = collaborators.filter((collaborator) =>
-  !authors.has(collaborator.mailmap) &&
-  !approvingReviewers.has(collaborator.name)
+  !contributors.has(collaborator.mailmap),
 );
 
 if (inactive.length) {

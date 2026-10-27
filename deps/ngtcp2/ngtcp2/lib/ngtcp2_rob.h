@@ -27,80 +27,13 @@
 
 #ifdef HAVE_CONFIG_H
 #  include <config.h>
-#endif /* HAVE_CONFIG_H */
+#endif /* defined(HAVE_CONFIG_H) */
 
 #include <ngtcp2/ngtcp2.h>
 
 #include "ngtcp2_mem.h"
 #include "ngtcp2_range.h"
 #include "ngtcp2_ksl.h"
-
-/*
- * ngtcp2_rob_gap represents the gap, which is the range of stream
- * data that is not received yet.
- */
-typedef struct ngtcp2_rob_gap {
-  /* range is the range of this gap. */
-  ngtcp2_range range;
-} ngtcp2_rob_gap;
-
-/*
- * ngtcp2_rob_gap_new allocates new ngtcp2_rob_gap object, and assigns
- * its pointer to |*pg|.  The caller should call ngtcp2_rob_gap_del to
- * delete it when it is no longer used.  The range of the gap is
- * [begin, end).  |mem| is custom memory allocator to allocate memory.
- *
- * This function returns 0 if it succeeds, or one of the following
- * negative error codes:
- *
- * NGTCP2_ERR_NOMEM
- *     Out of memory.
- */
-int ngtcp2_rob_gap_new(ngtcp2_rob_gap **pg, uint64_t begin, uint64_t end,
-                       const ngtcp2_mem *mem);
-
-/*
- * ngtcp2_rob_gap_del deallocates |g|.  It deallocates the memory
- * pointed by |g| it self.  |mem| is custom memory allocator to
- * deallocate memory.
- */
-void ngtcp2_rob_gap_del(ngtcp2_rob_gap *g, const ngtcp2_mem *mem);
-
-/*
- * ngtcp2_rob_data holds the buffered stream data.
- */
-typedef struct ngtcp2_rob_data {
-  /* range is the range of this gap. */
-  ngtcp2_range range;
-  /* begin points to the buffer. */
-  uint8_t *begin;
-  /* end points to the one beyond of the last byte of the buffer */
-  uint8_t *end;
-} ngtcp2_rob_data;
-
-/*
- * ngtcp2_rob_data_new allocates new ngtcp2_rob_data object, and
- * assigns its pointer to |*pd|.  The caller should call
- * ngtcp2_rob_data_del to delete it when it is no longer used.
- * |offset| is the stream offset of the first byte of this data.
- * |chunk| is the size of the buffer.  |offset| must be multiple of
- * |chunk|.  |mem| is custom memory allocator to allocate memory.
- *
- * This function returns 0 if it succeeds, or one of the following
- * negative error codes:
- *
- * NGTCP2_ERR_NOMEM
- *     Out of memory.
- */
-int ngtcp2_rob_data_new(ngtcp2_rob_data **pd, uint64_t offset, size_t chunk,
-                        const ngtcp2_mem *mem);
-
-/*
- * ngtcp2_rob_data_del deallocates |d|.  It deallocates the memory
- * pointed by |d| itself.  |mem| is custom memory allocator to
- * deallocate memory.
- */
-void ngtcp2_rob_data_del(ngtcp2_rob_data *d, const ngtcp2_mem *mem);
 
 /*
  * ngtcp2_rob is the reorder buffer which reassembles stream data
@@ -110,13 +43,16 @@ typedef struct ngtcp2_rob {
   /* gapksl maintains the range of offset which is not received
      yet. Initially, its range is [0, UINT64_MAX). */
   ngtcp2_ksl gapksl;
-  /* dataksl maintains the list of buffers which store received data
-     ordered by stream offset. */
+  /* dataksl maintains the buffers which store received out-of-order
+     data ordered by stream offset. */
   ngtcp2_ksl dataksl;
   /* mem is custom memory allocator */
   const ngtcp2_mem *mem;
   /* chunk is the size of each buffer in data field */
   size_t chunk;
+  /* discard_data, if nonzero, stops buffering data.  If it is
+     nonzero, ngtcp2_ksl_empty(&dataksl) always returns nonzero. */
+  int discard_data;
 } ngtcp2_rob;
 
 /*
@@ -137,38 +73,40 @@ int ngtcp2_rob_init(ngtcp2_rob *rob, size_t chunk, const ngtcp2_mem *mem);
 void ngtcp2_rob_free(ngtcp2_rob *rob);
 
 /*
- * ngtcp2_rob_push adds new data of length |datalen| at the stream
- * offset |offset|.
+ * ngtcp2_rob_push adds new data pointed by |data| of length |datalen|
+ * at the stream offset |offset|.
  *
- * This function returns 0 if it succeeds, or one of the following
- * negative error codes:
+ * If ngtcp2_rob_discard_data is called, this function does not buffer
+ * data.  The return value is the number of bytes that would be
+ * buffered if ngtcp2_rob_discard_data has not been called.
+ *
+ * This function returns the number of data newly buffered if it
+ * succeeds, or one of the following negative error codes:
  *
  * NGTCP2_ERR_NOMEM
  *     Out of memory
  */
-int ngtcp2_rob_push(ngtcp2_rob *rob, uint64_t offset, const uint8_t *data,
-                    size_t datalen);
+ngtcp2_ssize ngtcp2_rob_push(ngtcp2_rob *rob, uint64_t offset,
+                             const uint8_t *data, size_t datalen);
 
 /*
  * ngtcp2_rob_remove_prefix removes gap up to |offset|, exclusive.  It
- * also removes data buffer if it is completely included in |offset|.
- *
- * This function returns 0 if it succeeds, or one of the following
- * negative error codes:
- *
- * NGTCP2_ERR_NOMEM
- *     Out of memory
+ * also removes buffered data if it is completely included in
+ * |offset|.
  */
-int ngtcp2_rob_remove_prefix(ngtcp2_rob *rob, uint64_t offset);
+void ngtcp2_rob_remove_prefix(ngtcp2_rob *rob, uint64_t offset);
 
 /*
  * ngtcp2_rob_data_at stores the pointer to the buffer of stream
  * offset |offset| to |*pdest| if it is available, and returns the
  * valid length of available data.  If no data is available, it
- * returns 0.
+ * returns 0.  This function only returns the data before the first
+ * gap.  It returns 0 even if data is available after the first gap.
+ * If ngtcp2_rob_discard_data has been called, NULL is assigned to
+ * |*pdest| if this function returns nonzero.
  */
-size_t ngtcp2_rob_data_at(ngtcp2_rob *rob, const uint8_t **pdest,
-                          uint64_t offset);
+uint64_t ngtcp2_rob_data_at(const ngtcp2_rob *rob, const uint8_t **pdest,
+                            uint64_t offset);
 
 /*
  * ngtcp2_rob_pop clears data at stream offset |offset| of length
@@ -180,18 +118,26 @@ size_t ngtcp2_rob_data_at(ngtcp2_rob *rob, const uint8_t **pdest,
  *
  * Caller should call this function from offset 0 in non-decreasing
  * order.
+ *
+ * ngtcp2_rob_pop is noop if ngtcp2_rob_discard_data has been called.
  */
-void ngtcp2_rob_pop(ngtcp2_rob *rob, uint64_t offset, size_t len);
+void ngtcp2_rob_pop(ngtcp2_rob *rob, uint64_t offset, uint64_t len);
 
 /*
  * ngtcp2_rob_first_gap_offset returns the offset to the first gap.
  * If there is no gap, it returns UINT64_MAX.
  */
-uint64_t ngtcp2_rob_first_gap_offset(ngtcp2_rob *rob);
+uint64_t ngtcp2_rob_first_gap_offset(const ngtcp2_rob *rob);
 
 /*
  * ngtcp2_rob_data_buffered returns nonzero if any data is buffered.
  */
-int ngtcp2_rob_data_buffered(ngtcp2_rob *rob);
+int ngtcp2_rob_data_buffered(const ngtcp2_rob *rob);
 
-#endif /* NGTCP2_ROB_H */
+/*
+ * ngtcp2_rob_discard_data discards the buffered data, and stops
+ * buffering data any further.
+ */
+void ngtcp2_rob_discard_data(ngtcp2_rob *rob);
+
+#endif /* !defined(NGTCP2_ROB_H) */

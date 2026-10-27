@@ -141,7 +141,32 @@ function listener2() {}
 {
   const ee = new EventEmitter();
 
+  ee.once('hello', listener1);
+  ee.on('hello', listener2);
+  ee.on('removeListener', common.mustCall((eventName, listener) => {
+    assert.strictEqual(eventName, 'hello');
+    assert.strictEqual(listener, listener1);
+  }));
+  ee.emit('hello');
+}
+
+{
+  const ee = new EventEmitter();
+
   assert.deepStrictEqual(ee, ee.removeListener('foo', () => {}));
+}
+
+{
+  const ee = new EventEmitter();
+  ee.on('persistent', listener1);
+
+  for (let i = 0; i < 100; i++) {
+    const eventName = `event-${i}`;
+    ee.on(eventName, listener2);
+    ee.removeListener(eventName, listener2);
+  }
+
+  assert.deepStrictEqual(Reflect.ownKeys(ee._events), ['persistent']);
 }
 
 {
@@ -167,4 +192,20 @@ function listener2() {}
 
   ee.removeListener('foo', listener1);
   assert.strictEqual(ee._events.foo, listener2);
+}
+
+{
+  const { Writable } = require('stream');
+  const stream = new Writable({
+    write(chunk, encoding, callback) {
+      callback();
+    }
+  });
+
+  stream.on('removeListener', common.mustCall((eventName, listener) => {
+    assert.strictEqual(eventName, 'finish');
+  }));
+
+  stream.once('finish', common.mustCall());
+  stream.end();
 }

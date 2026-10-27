@@ -3,7 +3,7 @@
 const common = require('../common');
 const assert = require('assert');
 const http = require('http');
-const { Agent } = require('_http_agent');
+const { Agent } = require('http');
 
 const agent = new Agent({
   keepAlive: true,
@@ -16,11 +16,11 @@ const server = http.createServer(common.mustCall((req, res) => {
 
 server.listen(0, common.mustCall(() => {
   const createConnection = agent.createConnection;
-  agent.createConnection = (options, ...args) => {
+  agent.createConnection = common.mustCall((options, ...args) => {
     assert.strictEqual(options.keepAlive, true);
     assert.strictEqual(options.keepAliveInitialDelay, agent.keepAliveMsecs);
     return createConnection.call(agent, options, ...args);
-  };
+  });
   http.get({
     host: 'localhost',
     port: server.address().port,

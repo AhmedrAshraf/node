@@ -1,5 +1,5 @@
 /*
- * Copyright 2019-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2019-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -10,6 +10,7 @@
 #include <openssl/core.h>
 #include <openssl/core_dispatch.h>
 #include <openssl/encoder.h>
+#include <openssl/encodererr.h>
 #include <openssl/ui.h>
 #include "internal/core.h"
 #include "internal/namemap.h"
@@ -17,79 +18,81 @@
 #include "internal/provider.h"
 #include "crypto/encoder.h"
 #include "encoder_local.h"
+#include "crypto/context.h"
 
 /*
  * Encoder can have multiple names, separated with colons in a name string
  */
 #define NAME_SEPARATOR ':'
 
+static void ossl_encoder_free(void *data)
+{
+    OSSL_ENCODER *encoder = (OSSL_ENCODER *)data;
+    int ref = 0;
+
+    if (encoder == NULL)
+        return;
+
+    CRYPTO_DOWN_REF(&encoder->base.refcnt, &ref);
+    if (ref > 0)
+        return;
+    OPENSSL_free(encoder->base.name);
+    ossl_property_free(encoder->base.parsed_propdef);
+    ossl_provider_free(encoder->base.prov);
+    CRYPTO_FREE_REF(&encoder->base.refcnt);
+    OPENSSL_free(encoder);
+}
+
+static int ossl_encoder_up_ref(void *data)
+{
+    OSSL_ENCODER *encoder = (OSSL_ENCODER *)data;
+    int ref = 0;
+
+    return CRYPTO_UP_REF(&encoder->base.refcnt, &ref);
+}
+
 /* Simple method structure constructor and destructor */
 static OSSL_ENCODER *ossl_encoder_new(void)
 {
     OSSL_ENCODER *encoder = NULL;
 
-    if ((encoder = OPENSSL_zalloc(sizeof(*encoder))) == NULL
-        || (encoder->base.lock = CRYPTO_THREAD_lock_new()) == NULL) {
+    if ((encoder = OPENSSL_zalloc(sizeof(*encoder))) == NULL)
+        return NULL;
+    if (!CRYPTO_NEW_REF(&encoder->base.refcnt, 1)) {
         OSSL_ENCODER_free(encoder);
-        ERR_raise(ERR_LIB_OSSL_ENCODER, ERR_R_MALLOC_FAILURE);
         return NULL;
     }
-
-    encoder->base.refcnt = 1;
 
     return encoder;
 }
 
 int OSSL_ENCODER_up_ref(OSSL_ENCODER *encoder)
 {
-    int ref = 0;
-
-    CRYPTO_UP_REF(&encoder->base.refcnt, &ref, encoder->base.lock);
+#ifdef OPENSSL_NO_CACHED_FETCH
+    return ossl_encoder_up_ref(encoder);
+#else
+    if (encoder->base.no_store != 0)
+        return ossl_encoder_up_ref(encoder);
     return 1;
+#endif
 }
 
 void OSSL_ENCODER_free(OSSL_ENCODER *encoder)
 {
-    int ref = 0;
-
-    if (encoder == NULL)
-        return;
-
-    CRYPTO_DOWN_REF(&encoder->base.refcnt, &ref, encoder->base.lock);
-    if (ref > 0)
-        return;
-    OPENSSL_free(encoder->base.name);
-    ossl_property_free(encoder->base.parsed_propdef);
-    ossl_provider_free(encoder->base.prov);
-    CRYPTO_THREAD_lock_free(encoder->base.lock);
-    OPENSSL_free(encoder);
+#ifdef OPENSSL_NO_CACHED_FETCH
+    ossl_encoder_free(encoder);
+#else
+    if (encoder != NULL && (encoder->base.no_store != 0))
+        ossl_encoder_free(encoder);
+#endif
 }
-
-/* Permanent encoder method store, constructor and destructor */
-static void encoder_store_free(void *vstore)
-{
-    ossl_method_store_free(vstore);
-}
-
-static void *encoder_store_new(OSSL_LIB_CTX *ctx)
-{
-    return ossl_method_store_new(ctx);
-}
-
-
-static const OSSL_LIB_CTX_METHOD encoder_store_method = {
-    /* We want encoder_store to be cleaned up before the provider store */
-    OSSL_LIB_CTX_METHOD_PRIORITY_2,
-    encoder_store_new,
-    encoder_store_free,
-};
 
 /* Data to be passed through ossl_method_construct() */
 struct encoder_data_st {
     OSSL_LIB_CTX *libctx;
-    int id;                      /* For get_encoder_from_store() */
-    const char *names;           /* For get_encoder_from_store() */
-    const char *propquery;       /* For get_encoder_from_store() */
+    int id; /* For get_encoder_from_store() */
+    const char *names; /* For get_encoder_from_store() */
+    const char *propquery; /* For get_encoder_from_store() */
 
     OSSL_METHOD_STORE *tmp_store; /* For get_tmp_encoder_store() */
 
@@ -120,8 +123,7 @@ static void dealloc_tmp_encoder_store(void *store)
 /* Get the permanent encoder store */
 static OSSL_METHOD_STORE *get_encoder_store(OSSL_LIB_CTX *libctx)
 {
-    return ossl_lib_ctx_get_data(libctx, OSSL_LIB_CTX_ENCODER_STORE_INDEX,
-                                 &encoder_store_method);
+    return ossl_lib_ctx_get_data(libctx, OSSL_LIB_CTX_ENCODER_STORE_INDEX);
 }
 
 static int reserve_encoder_store(void *store, void *data)
@@ -148,7 +150,7 @@ static int unreserve_encoder_store(void *store, void *data)
 
 /* Get encoder methods from a store, or put one in */
 static void *get_encoder_from_store(void *store, const OSSL_PROVIDER **prov,
-                                    void *data)
+    void *data)
 {
     struct encoder_data_st *methdata = data;
     void *method = NULL;
@@ -183,9 +185,9 @@ static void *get_encoder_from_store(void *store, const OSSL_PROVIDER **prov,
 }
 
 static int put_encoder_in_store(void *store, void *method,
-                                const OSSL_PROVIDER *prov,
-                                const char *names, const char *propdef,
-                                void *data)
+    const OSSL_PROVIDER *prov,
+    const char *names, const char *propdef,
+    void *data)
 {
     struct encoder_data_st *methdata = data;
     OSSL_NAMEMAP *namemap;
@@ -212,13 +214,13 @@ static int put_encoder_in_store(void *store, void *method,
         return 0;
 
     return ossl_method_store_add(store, prov, id, propdef, method,
-                                 (int (*)(void *))OSSL_ENCODER_up_ref,
-                                 (void (*)(void *))OSSL_ENCODER_free);
+        ossl_encoder_up_ref,
+        ossl_encoder_free);
 }
 
 /* Create and populate a encoder method */
 static void *encoder_from_algorithm(int id, const OSSL_ALGORITHM *algodef,
-                                    OSSL_PROVIDER *prov)
+    OSSL_PROVIDER *prov, int no_store)
 {
     OSSL_ENCODER *encoder = NULL;
     const OSSL_DISPATCH *fns = algodef->implementation;
@@ -227,14 +229,16 @@ static void *encoder_from_algorithm(int id, const OSSL_ALGORITHM *algodef,
     if ((encoder = ossl_encoder_new()) == NULL)
         return NULL;
     encoder->base.id = id;
+    encoder->base.no_store = no_store;
     if ((encoder->base.name = ossl_algorithm_get1_first_name(algodef)) == NULL) {
-        OSSL_ENCODER_free(encoder);
+        ossl_encoder_free(encoder);
         return NULL;
     }
     encoder->base.algodef = algodef;
     if ((encoder->base.parsed_propdef
-         = ossl_parse_property(libctx, algodef->property_definition)) == NULL) {
-        OSSL_ENCODER_free(encoder);
+            = ossl_parse_property(libctx, algodef->property_definition))
+        == NULL) {
+        ossl_encoder_free(encoder);
         return NULL;
     }
 
@@ -242,38 +246,31 @@ static void *encoder_from_algorithm(int id, const OSSL_ALGORITHM *algodef,
         switch (fns->function_id) {
         case OSSL_FUNC_ENCODER_NEWCTX:
             if (encoder->newctx == NULL)
-                encoder->newctx =
-                    OSSL_FUNC_encoder_newctx(fns);
+                encoder->newctx = OSSL_FUNC_encoder_newctx(fns);
             break;
         case OSSL_FUNC_ENCODER_FREECTX:
             if (encoder->freectx == NULL)
-                encoder->freectx =
-                    OSSL_FUNC_encoder_freectx(fns);
+                encoder->freectx = OSSL_FUNC_encoder_freectx(fns);
             break;
         case OSSL_FUNC_ENCODER_GET_PARAMS:
             if (encoder->get_params == NULL)
-                encoder->get_params =
-                    OSSL_FUNC_encoder_get_params(fns);
+                encoder->get_params = OSSL_FUNC_encoder_get_params(fns);
             break;
         case OSSL_FUNC_ENCODER_GETTABLE_PARAMS:
             if (encoder->gettable_params == NULL)
-                encoder->gettable_params =
-                    OSSL_FUNC_encoder_gettable_params(fns);
+                encoder->gettable_params = OSSL_FUNC_encoder_gettable_params(fns);
             break;
         case OSSL_FUNC_ENCODER_SET_CTX_PARAMS:
             if (encoder->set_ctx_params == NULL)
-                encoder->set_ctx_params =
-                    OSSL_FUNC_encoder_set_ctx_params(fns);
+                encoder->set_ctx_params = OSSL_FUNC_encoder_set_ctx_params(fns);
             break;
         case OSSL_FUNC_ENCODER_SETTABLE_CTX_PARAMS:
             if (encoder->settable_ctx_params == NULL)
-                encoder->settable_ctx_params =
-                    OSSL_FUNC_encoder_settable_ctx_params(fns);
+                encoder->settable_ctx_params = OSSL_FUNC_encoder_settable_ctx_params(fns);
             break;
         case OSSL_FUNC_ENCODER_DOES_SELECTION:
             if (encoder->does_selection == NULL)
-                encoder->does_selection =
-                    OSSL_FUNC_encoder_does_selection(fns);
+                encoder->does_selection = OSSL_FUNC_encoder_does_selection(fns);
             break;
         case OSSL_FUNC_ENCODER_ENCODE:
             if (encoder->encode == NULL)
@@ -281,13 +278,11 @@ static void *encoder_from_algorithm(int id, const OSSL_ALGORITHM *algodef,
             break;
         case OSSL_FUNC_ENCODER_IMPORT_OBJECT:
             if (encoder->import_object == NULL)
-                encoder->import_object =
-                    OSSL_FUNC_encoder_import_object(fns);
+                encoder->import_object = OSSL_FUNC_encoder_import_object(fns);
             break;
         case OSSL_FUNC_ENCODER_FREE_OBJECT:
             if (encoder->free_object == NULL)
-                encoder->free_object =
-                    OSSL_FUNC_encoder_free_object(fns);
+                encoder->free_object = OSSL_FUNC_encoder_free_object(fns);
             break;
         }
     }
@@ -297,17 +292,17 @@ static void *encoder_from_algorithm(int id, const OSSL_ALGORITHM *algodef,
      * You must have the encoding driver functions.
      */
     if (!((encoder->newctx == NULL && encoder->freectx == NULL)
-          || (encoder->newctx != NULL && encoder->freectx != NULL)
-          || (encoder->import_object != NULL && encoder->free_object != NULL)
-          || (encoder->import_object == NULL && encoder->free_object == NULL))
+            || (encoder->newctx != NULL && encoder->freectx != NULL)
+            || (encoder->import_object != NULL && encoder->free_object != NULL)
+            || (encoder->import_object == NULL && encoder->free_object == NULL))
         || encoder->encode == NULL) {
-        OSSL_ENCODER_free(encoder);
+        ossl_encoder_free(encoder);
         ERR_raise(ERR_LIB_OSSL_ENCODER, ERR_R_INVALID_PROVIDER_FUNCTIONS);
         return NULL;
     }
 
     if (prov != NULL && !ossl_provider_up_ref(prov)) {
-        OSSL_ENCODER_free(encoder);
+        ossl_encoder_free(encoder);
         return NULL;
     }
 
@@ -315,14 +310,13 @@ static void *encoder_from_algorithm(int id, const OSSL_ALGORITHM *algodef,
     return encoder;
 }
 
-
 /*
  * The core fetching functionality passes the names of the implementation.
  * This function is responsible to getting an identity number for them,
  * then call encoder_from_algorithm() with that identity number.
  */
 static void *construct_encoder(const OSSL_ALGORITHM *algodef,
-                               OSSL_PROVIDER *prov, void *data)
+    OSSL_PROVIDER *prov, void *data, int no_store)
 {
     /*
      * This function is only called if get_encoder_from_store() returned
@@ -338,7 +332,7 @@ static void *construct_encoder(const OSSL_ALGORITHM *algodef,
     void *method = NULL;
 
     if (id != 0)
-        method = encoder_from_algorithm(id, algodef, prov);
+        method = encoder_from_algorithm(id, algodef, prov, no_store);
 
     /*
      * Flag to indicate that there was actual construction errors.  This
@@ -354,53 +348,32 @@ static void *construct_encoder(const OSSL_ALGORITHM *algodef,
 /* Intermediary function to avoid ugly casts, used below */
 static void destruct_encoder(void *method, void *data)
 {
-    OSSL_ENCODER_free(method);
-}
-
-static int up_ref_encoder(void *method)
-{
-    return OSSL_ENCODER_up_ref(method);
-}
-
-static void free_encoder(void *method)
-{
-    OSSL_ENCODER_free(method);
+    ossl_encoder_free(method);
 }
 
 /* Fetching support.  Can fetch by numeric identity or by name */
 static OSSL_ENCODER *
-inner_ossl_encoder_fetch(struct encoder_data_st *methdata, int id,
-                         const char *name, const char *properties)
+inner_ossl_encoder_fetch(struct encoder_data_st *methdata,
+    const char *name, const char *properties)
 {
     OSSL_METHOD_STORE *store = get_encoder_store(methdata->libctx);
     OSSL_NAMEMAP *namemap = ossl_namemap_stored(methdata->libctx);
     const char *const propq = properties != NULL ? properties : "";
     void *method = NULL;
-    int unsupported = 0;
+    int unsupported, id;
 
     if (store == NULL || namemap == NULL) {
         ERR_raise(ERR_LIB_OSSL_ENCODER, ERR_R_PASSED_INVALID_ARGUMENT);
         return NULL;
     }
 
-    /*
-     * If we have been passed both an id and a name, we have an
-     * internal programming error.
-     */
-    if (!ossl_assert(id == 0 || name == NULL)) {
-        ERR_raise(ERR_LIB_OSSL_ENCODER, ERR_R_INTERNAL_ERROR);
-        return NULL;
-    }
-
-    if (id == 0)
-        id = ossl_namemap_name2num(namemap, name);
+    id = ossl_namemap_name2num(namemap, name);
 
     /*
      * If we haven't found the name yet, chances are that the algorithm to
      * be fetched is unsupported.
      */
-    if (id == 0)
-        unsupported = 1;
+    unsupported = id == 0;
 
     if (id == 0
         || !ossl_method_store_cache_get(store, NULL, id, propq, &method)) {
@@ -420,8 +393,9 @@ inner_ossl_encoder_fetch(struct encoder_data_st *methdata, int id,
         methdata->propquery = propq;
         methdata->flag_construct_error_occurred = 0;
         if ((method = ossl_method_construct(methdata->libctx, OSSL_OP_ENCODER,
-                                            &prov, 0 /* !force_cache */,
-                                            &mcm, methdata)) != NULL) {
+                 &prov, 0 /* !force_cache */,
+                 &mcm, methdata))
+            != NULL) {
             /*
              * If construction did create a method for us, we know that
              * there is a correct name_id and meth_id, since those have
@@ -430,8 +404,19 @@ inner_ossl_encoder_fetch(struct encoder_data_st *methdata, int id,
              */
             if (id == 0)
                 id = ossl_namemap_name2num(namemap, name);
-            ossl_method_store_cache_set(store, prov, id, propq, method,
-                                        up_ref_encoder, free_encoder);
+            if (id != 0 && methdata->tmp_store == NULL) {
+                ossl_method_store_cache_set(store, prov, id, propq, method,
+                    ossl_encoder_up_ref, ossl_encoder_free);
+            } else {
+                /*
+                 * Like with EVP methods, if the provider requests no caching we need
+                 * to take an extra refcount here so that the tmp_stored encoder
+                 * lives beyond the freeing of that tmp_store
+                 */
+#ifndef OPENSSL_NO_CACHED_FETCH
+                OSSL_ENCODER_up_ref((OSSL_ENCODER *)method);
+#endif
+            }
         }
 
         /*
@@ -447,37 +432,24 @@ inner_ossl_encoder_fetch(struct encoder_data_st *methdata, int id,
         if (name == NULL)
             name = ossl_namemap_num2name(namemap, id, 0);
         ERR_raise_data(ERR_LIB_OSSL_ENCODER, code,
-                       "%s, Name (%s : %d), Properties (%s)",
-                       ossl_lib_ctx_get_descriptor(methdata->libctx),
-                       name == NULL ? "<null>" : name, id,
-                       properties == NULL ? "<null>" : properties);
+            "%s, Name (%s : %d), Properties (%s)",
+            ossl_lib_ctx_get_descriptor(methdata->libctx),
+            name == NULL ? "<null>" : name, id,
+            properties == NULL ? "<null>" : properties);
     }
 
     return method;
 }
 
 OSSL_ENCODER *OSSL_ENCODER_fetch(OSSL_LIB_CTX *libctx, const char *name,
-                                 const char *properties)
+    const char *properties)
 {
     struct encoder_data_st methdata;
     void *method;
 
     methdata.libctx = libctx;
     methdata.tmp_store = NULL;
-    method = inner_ossl_encoder_fetch(&methdata, 0, name, properties);
-    dealloc_tmp_encoder_store(methdata.tmp_store);
-    return method;
-}
-
-OSSL_ENCODER *ossl_encoder_fetch_by_number(OSSL_LIB_CTX *libctx, int id,
-                                           const char *properties)
-{
-    struct encoder_data_st methdata;
-    void *method;
-
-    methdata.libctx = libctx;
-    methdata.tmp_store = NULL;
-    method = inner_ossl_encoder_fetch(&methdata, id, NULL, properties);
+    method = inner_ossl_encoder_fetch(&methdata, name, properties);
     dealloc_tmp_encoder_store(methdata.tmp_store);
     return method;
 }
@@ -580,16 +552,16 @@ static void do_one(ossl_unused int id, void *method, void *arg)
 }
 
 void OSSL_ENCODER_do_all_provided(OSSL_LIB_CTX *libctx,
-                                  void (*user_fn)(OSSL_ENCODER *encoder,
-                                                  void *arg),
-                                  void *user_arg)
+    void (*user_fn)(OSSL_ENCODER *encoder,
+        void *arg),
+    void *user_arg)
 {
     struct encoder_data_st methdata;
     struct do_one_data_st data;
 
     methdata.libctx = libctx;
     methdata.tmp_store = NULL;
-    (void)inner_ossl_encoder_fetch(&methdata, 0, NULL, NULL /* properties */);
+    (void)inner_ossl_encoder_fetch(&methdata, NULL, NULL /* properties */);
 
     data.user_fn = user_fn;
     data.user_arg = user_arg;
@@ -600,8 +572,8 @@ void OSSL_ENCODER_do_all_provided(OSSL_LIB_CTX *libctx,
 }
 
 int OSSL_ENCODER_names_do_all(const OSSL_ENCODER *encoder,
-                              void (*fn)(const char *name, void *data),
-                              void *data)
+    void (*fn)(const char *name, void *data),
+    void *data)
 {
     if (encoder == NULL)
         return 0;
@@ -652,18 +624,16 @@ OSSL_ENCODER_CTX *OSSL_ENCODER_CTX_new(void)
 {
     OSSL_ENCODER_CTX *ctx;
 
-    if ((ctx = OPENSSL_zalloc(sizeof(*ctx))) == NULL)
-        ERR_raise(ERR_LIB_OSSL_ENCODER, ERR_R_MALLOC_FAILURE);
-
+    ctx = OPENSSL_zalloc(sizeof(*ctx));
     return ctx;
 }
 
 int OSSL_ENCODER_CTX_set_params(OSSL_ENCODER_CTX *ctx,
-                                const OSSL_PARAM params[])
+    const OSSL_PARAM params[])
 {
     int ok = 1;
-    size_t i;
-    size_t l;
+    int i;
+    int l;
 
     if (!ossl_assert(ctx != NULL)) {
         ERR_raise(ERR_LIB_OSSL_ENCODER, ERR_R_PASSED_NULL_PARAMETER);
@@ -675,8 +645,7 @@ int OSSL_ENCODER_CTX_set_params(OSSL_ENCODER_CTX *ctx,
 
     l = OSSL_ENCODER_CTX_get_num_encoders(ctx);
     for (i = 0; i < l; i++) {
-        OSSL_ENCODER_INSTANCE *encoder_inst =
-            sk_OSSL_ENCODER_INSTANCE_value(ctx->encoder_insts, i);
+        OSSL_ENCODER_INSTANCE *encoder_inst = sk_OSSL_ENCODER_INSTANCE_value(ctx->encoder_insts, i);
         OSSL_ENCODER *encoder = OSSL_ENCODER_INSTANCE_get_encoder(encoder_inst);
         void *encoderctx = OSSL_ENCODER_INSTANCE_get_encoder_ctx(encoder_inst);
 
@@ -688,11 +657,60 @@ int OSSL_ENCODER_CTX_set_params(OSSL_ENCODER_CTX *ctx,
     return ok;
 }
 
+int OSSL_ENCODER_CTX_ctrl_string(OSSL_ENCODER_CTX *ctx,
+    const char *name, const char *value)
+{
+    const OSSL_PARAM *settable = NULL;
+    int i, n, ok = 0;
+
+    if (!ossl_assert(ctx != NULL)) {
+        ERR_raise(ERR_LIB_OSSL_ENCODER, ERR_R_PASSED_NULL_PARAMETER);
+        return 0;
+    }
+
+    if (ctx->encoder_insts == NULL)
+        return 1;
+
+    n = OSSL_ENCODER_CTX_get_num_encoders(ctx);
+    for (i = 0; i < n; i++) {
+        OSSL_ENCODER_INSTANCE *encoder_inst = sk_OSSL_ENCODER_INSTANCE_value(ctx->encoder_insts, i);
+        OSSL_ENCODER *encoder = OSSL_ENCODER_INSTANCE_get_encoder(encoder_inst);
+        void *encoderctx = OSSL_ENCODER_INSTANCE_get_encoder_ctx(encoder_inst);
+        OSSL_PARAM params[2] = { OSSL_PARAM_END, OSSL_PARAM_END };
+        int good = 0;
+
+        if (encoderctx == NULL || encoder->set_ctx_params == NULL)
+            continue;
+
+        settable = OSSL_ENCODER_settable_ctx_params(encoder);
+        if (settable == NULL)
+            continue;
+        if (!OSSL_PARAM_allocate_from_text(params, settable, name, value,
+                strlen(value), &good)) {
+            if (!good)
+                continue;
+            ERR_raise_data(ERR_LIB_OSSL_ENCODER, OSSL_ENCODER_R_BAD_PARAMETER_VALUE,
+                "bad encoder parameter value: %s:%s", name, value);
+            return 0;
+        }
+        good = encoder->set_ctx_params(encoderctx, params);
+        OPENSSL_free(params[0].data);
+        if (!good)
+            return 0;
+        ++ok;
+    }
+    if (!ok) {
+        ERR_raise_data(ERR_LIB_OSSL_ENCODER, OSSL_ENCODER_R_UNKNOWN_PARAMETER_NAME,
+            "unknown encoder parameter name: %s", name);
+    }
+    return ok;
+}
+
 void OSSL_ENCODER_CTX_free(OSSL_ENCODER_CTX *ctx)
 {
     if (ctx != NULL) {
         sk_OSSL_ENCODER_INSTANCE_pop_free(ctx->encoder_insts,
-                                          ossl_encoder_instance_free);
+            ossl_encoder_instance_free);
         OPENSSL_free(ctx->construct_data);
         ossl_pw_clear_passphrase_data(&ctx->pwdata);
         OPENSSL_free(ctx);

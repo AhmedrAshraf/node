@@ -34,7 +34,9 @@ const requestListener = ({ url }, rsp) => {
     .end();
 };
 
-const server = http.createServer(requestListener);
+// Leave closing idle connections to the client, so that the loader never
+// reuses a keep-alive socket the server has just closed.
+const server = http.createServer({ keepAliveTimeout: 0 }, requestListener);
 
 await promisify(server.listen.bind(server))({
   host: '127.0.0.1',
@@ -46,7 +48,7 @@ const {
   port,
 } = server.address();
 
-describe('ESM: http import via loader', { concurrency: true }, () => {
+describe('ESM: http import via loader', { concurrency: !process.env.TEST_PARALLEL }, () => {
   it('should load using --import flag', async () => {
     // ! MUST NOT use spawnSync to avoid blocking the event loop
     const { code, signal, stderr, stdout } = await spawnPromisified(

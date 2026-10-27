@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2017-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -8,15 +8,16 @@
  */
 
 #ifndef OSSL_CRYPTO_SIPHASH_H
-# define OSSL_CRYPTO_SIPHASH_H
-# pragma once
+#define OSSL_CRYPTO_SIPHASH_H
+#pragma once
 
-# include <stddef.h>
+#include <stddef.h>
+#include <stdint.h>
 
-# define SIPHASH_BLOCK_SIZE        8
-# define SIPHASH_KEY_SIZE         16
-# define SIPHASH_MIN_DIGEST_SIZE   8
-# define SIPHASH_MAX_DIGEST_SIZE  16
+#define SIPHASH_BLOCK_SIZE 8
+#define SIPHASH_KEY_SIZE 16
+#define SIPHASH_MIN_DIGEST_SIZE 8
+#define SIPHASH_MAX_DIGEST_SIZE 16
 
 typedef struct siphash_st SIPHASH;
 
@@ -24,7 +25,7 @@ size_t SipHash_ctx_size(void);
 size_t SipHash_hash_size(SIPHASH *ctx);
 int SipHash_set_hash_size(SIPHASH *ctx, size_t hash_size);
 int SipHash_Init(SIPHASH *ctx, const unsigned char *k,
-                 int crounds, int drounds);
+    int crounds, int drounds);
 void SipHash_Update(SIPHASH *ctx, const unsigned char *in, size_t inlen);
 int SipHash_Final(SIPHASH *ctx, unsigned char *out, size_t outlen);
 
@@ -44,7 +45,7 @@ struct siphash_st {
 };
 
 /* default: SipHash-2-4 */
-# define SIPHASH_C_ROUNDS 2
-# define SIPHASH_D_ROUNDS 4
+#define SIPHASH_C_ROUNDS 2
+#define SIPHASH_D_ROUNDS 4
 
 #endif

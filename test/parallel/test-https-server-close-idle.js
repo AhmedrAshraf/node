@@ -31,7 +31,7 @@ server.on('connection', function() {
   connections++;
 });
 
-server.listen(0, function() {
+server.listen(0, common.mustCall(() => {
   const port = server.address().port;
   let client1Closed = false;
   let client2Closed = false;
@@ -52,7 +52,6 @@ server.listen(0, function() {
         assert(response.startsWith('HTTP/1.1 200 OK\r\nConnection: keep-alive'));
         assert.strictEqual(connections, 2);
 
-        server.closeIdleConnections();
         server.close(common.mustCall());
 
         // Check that only the idle connection got closed
@@ -80,4 +79,4 @@ server.listen(0, function() {
   client1.on('error', () => {});
 
   client1.write('GET / HTTP/1.1');
-});
+}));

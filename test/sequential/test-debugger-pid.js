@@ -8,12 +8,16 @@ const startCLI = require('../common/debugger');
 
 const assert = require('assert');
 const { spawn } = require('child_process');
+const { once } = require('events');
 
 const script = fixtures.path('debugger', 'alive.js');
 
-const runTest = async () => {
-  const target = spawn(process.execPath, [script]);
-  const cli = startCLI(['-p', `${target.pid}`]);
+(async () => {
+  const target = spawn(process.execPath, [script], {
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  });
+  await once(target, 'message');
+  const cli = startCLI(['-p', `${target.pid}`], [], {}, { randomPort: false });
 
   try {
     await cli.waitForPrompt();
@@ -24,12 +28,9 @@ const runTest = async () => {
       cli.output,
       /> 3 {3}\+\+x;/,
       'marks the 3rd line');
-  } catch (error) {
-    assert.ifError(error);
   } finally {
-    await cli.quit();
+    const targetClosed = once(target, 'close');
     target.kill();
+    await Promise.all([cli.quit(), targetClosed]);
   }
-};
-
-runTest().then(common.mustCall());
+})().then(common.mustCall());

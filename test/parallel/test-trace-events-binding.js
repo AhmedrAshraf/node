@@ -3,7 +3,10 @@ const common = require('../common');
 const assert = require('assert');
 const cp = require('child_process');
 const fs = require('fs');
-const path = require('path');
+
+// V8's trace() builtin only accepts the begin, end and instant phases on a
+// perfetto build, so the nestable async phase used here throws a TypeError.
+common.skipIfPerfettoEnabled();
 
 const CODE = `
   const { internalBinding } = require('internal/test/binding');
@@ -19,7 +22,7 @@ const CODE = `
 
 const tmpdir = require('../common/tmpdir');
 tmpdir.refresh();
-const FILE_NAME = path.join(tmpdir.path, 'node_trace.1.log');
+const FILE_NAME = tmpdir.resolve('node_trace.1.log');
 
 const proc = cp.spawn(process.execPath,
                       [ '--trace-event-categories', 'custom',

@@ -1,5 +1,5 @@
 #! /usr/bin/env perl
-# Copyright 2018-2021 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2018-2026 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -62,7 +62,7 @@ my @opensslcpphandlers = (
     ##################################################################
     # OpenSSL CPP specials
     #
-    # These are used to convert certain pre-precessor expressions into
+    # These are used to convert certain pre-processor expressions into
     # others that @cpphandlers have a better chance to understand.
 
     # This changes any OPENSSL_NO_DEPRECATED_x_y[_z] check to a check of
@@ -73,6 +73,22 @@ my @opensslcpphandlers = (
       massager => sub {
           return (<<"EOF");
 #if$1 OPENSSL_NO_DEPRECATEDIN_$2
+EOF
+      }
+    },
+    # Do the same for modern CPP definition tests.
+    { regexp   => qr/#if (\!defined).*OPENSSL_NO_DEPRECATED_(\d+_\d+(?:_\d+)?).*$/,
+      massager => sub {
+          return (<<"EOF");
+#ifndef OPENSSL_NO_DEPRECATEDIN_$2
+EOF
+      }
+    },
+    # Do the same for modern CPP definition tests.
+    { regexp   => qr/#if (defined).*OPENSSL_NO_DEPRECATED_(\d+_\d+(?:_\d+)?).*$/,
+      massager => sub {
+          return (<<"EOF");
+#ifdef OPENSSL_NO_DEPRECATEDIN_$2
 EOF
       }
     }
@@ -266,7 +282,13 @@ my @opensslchandlers = (
     { regexp   => qr/OSSL_DEPRECATEDIN_\d+_\d+(?:_\d+)?\s+(.*)/,
       massager => sub { return $1; },
     },
+    { regexp   => qr/OSSL_DEPRECATEDIN_\d+_\d+(?:_\d+)?_FOR<<<.*>>>(.*)/,
+      massager => sub { return $1; },
+    },
     { regexp   => qr/(.*?)\s+OSSL_DEPRECATEDIN_\d+_\d+(?:_\d+)?\s+(.*)/,
+      massager => sub { return "$1 $2"; },
+    },
+    { regexp   => qr/(.*?)\s+OSSL_DEPRECATEDIN_\d+_\d+(?:_\d+)?_FOR<<<.*>>>(.*)/,
       massager => sub { return "$1 $2"; },
     },
 
@@ -292,7 +314,7 @@ EOF
     { regexp   => qr/(.*)\bLHASH_OF<<<\((.*?)\)>>>(.*)/,
       massager => sub { return ("$1struct lhash_st_$2$3"); }
     },
-    { regexp   => qr/DEFINE_LHASH_OF(?:_INTERNAL)?<<<\((.*)\)>>>/,
+    { regexp   => qr/DEFINE_LHASH_OF(?:_INTERNAL|_EX)?<<<\((.*)\)>>>/,
       massager => sub {
           return (<<"EOF");
 static ossl_inline LHASH_OF($1) * lh_$1_new(unsigned long (*hfn)(const $1 *),
@@ -457,6 +479,15 @@ int d2i_$2(void);
 int i2d_$2(void);
 int $2_free(void);
 int $2_new(void);
+DECLARE_ASN1_ITEM($2)
+EOF
+      },
+    },
+    { regexp   => qr/DECLARE_ASN1_ENCODE_FUNCTIONS_name_attr<<<\((.*),\s*(.*)\)>>>/,
+      massager => sub {
+          return (<<"EOF");
+int d2i_$2(void);
+int i2d_$2(void);
 DECLARE_ASN1_ITEM($2)
 EOF
       },
@@ -822,7 +853,7 @@ sub parse {
         # We use ¦undef¦ as a marker for a new line from the file.
         # Since we convert one line to several and unshift that into @lines,
         # that's the only safe way we have to track the original lines
-        my @lines = map { ( undef, $_ ) } split $/, $line;
+        my @lines = map { ( undef, $_ ) } split m|\R|, $line;
 
         # Remember that extra # we added above?  Now we remove it
         pop @lines;

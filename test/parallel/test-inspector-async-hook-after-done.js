@@ -3,7 +3,12 @@
 const common = require('../common');
 
 common.skipIfInspectorDisabled();
-common.skipIfWorker();
+
+const { isMainThread } = require('worker_threads');
+
+if (!isMainThread) {
+  common.skip('This test only works on a main thread');
+}
 
 const assert = require('assert');
 const { Worker } = require('worker_threads');
@@ -29,8 +34,8 @@ function onAttachToWorker({ params: { sessionId } }) {
       session.once('NodeWorker.receivedMessageFromWorker', onMessageReceived);
       return;
     }
-    // Force a call to node::inspector::Agent::ToggleAsyncHook by changing the
-    // async call stack depth
+    // Force a call to node::inspector::Agent::SyncAsyncHookState by changing
+    // the async call stack depth
     postToWorkerInspector('Debugger.setAsyncCallStackDepth', { maxDepth: 1 });
     // This is were the original crash happened
     session.post('NodeWorker.detach', { sessionId }, () => {
@@ -52,12 +57,12 @@ session.connect();
 
 session.on('NodeWorker.attachedToWorker', common.mustCall(onAttachToWorker));
 
-session.post('NodeWorker.enable', { waitForDebuggerOnStart: true }, () => {
+session.post('NodeWorker.enable', { waitForDebuggerOnStart: true }, common.mustCall(() => {
   new Worker('console.log("Worker is done")', { eval: true })
-    .once('exit', () => {
-      setTimeout(() => {
+    .once('exit', common.mustCall(() => {
+      setTimeout(common.mustCall(() => {
         assert.strictEqual(done, true);
         console.log('Test is done');
-      }, 0);
-    });
-});
+      }), 0);
+    }));
+}));

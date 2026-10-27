@@ -6,7 +6,10 @@ if (!common.hasCrypto)
   common.skip('missing crypto');
 
 const assert = require('assert');
-const { subtle } = require('crypto').webcrypto;
+const { getFips } = require('crypto');
+const { hasFIPS } = require('../common/crypto');
+const { subtle } = globalThis.crypto;
+const rejectsSha1Signing = hasFIPS(3) && !hasFIPS(3, 5);
 
 const vectors = require('../fixtures/crypto/ecdsa')();
 
@@ -50,7 +53,7 @@ async function testVerify({ name,
     subtle.generateKey(
       {
         name: 'RSA-PSS',
-        modulusLength: 1024,
+        modulusLength: getFips() === 1 ? 2048 : 1024,
         publicExponent: new Uint8Array([1, 0, 1]),
         hash: 'SHA-256',
       },
@@ -88,17 +91,17 @@ async function testVerify({ name,
   // Test failure when using the wrong algorithms
   await assert.rejects(
     subtle.verify({ name, hash }, hmacKey, signature, plaintext), {
-      message: /Unable to use this key to verify/
+      message: /Key algorithm mismatch/
     });
 
   await assert.rejects(
     subtle.verify({ name, hash }, rsaKeys.publicKey, signature, plaintext), {
-      message: /Unable to use this key to verify/
+      message: /Key algorithm mismatch/
     });
 
   await assert.rejects(
     subtle.verify({ name, hash }, okpKeys.publicKey, signature, plaintext), {
-      message: /Unable to use this key to verify/
+      message: /Key algorithm mismatch/
     });
 
   // Test failure when signature is altered
@@ -135,7 +138,8 @@ async function testVerify({ name,
 
   await assert.rejects(
     subtle.verify({ name, hash: 'sha256' }, publicKey, signature, copy), {
-      message: /Unrecognized name/
+      message: /Unrecognized algorithm name/,
+      name: 'NotSupportedError',
     });
 }
 
@@ -148,7 +152,6 @@ async function testSign({ name,
                           plaintext }) {
   const [
     publicKey,
-    noSignPrivateKey,
     privateKey,
     hmacKey,
     rsaKeys,
@@ -165,12 +168,6 @@ async function testSign({ name,
       privateKeyBuffer,
       { name, namedCurve },
       false,
-      [ /* No usages */ ]),
-    subtle.importKey(
-      'pkcs8',
-      privateKeyBuffer,
-      { name, namedCurve },
-      false,
       ['sign']),
     subtle.generateKey(
       { name: 'HMAC', hash: 'SHA-256' },
@@ -179,7 +176,7 @@ async function testSign({ name,
     subtle.generateKey(
       {
         name: 'RSA-PSS',
-        modulusLength: 1024,
+        modulusLength: getFips() === 1 ? 2048 : 1024,
         publicExponent: new Uint8Array([1, 0, 1]),
         hash: 'SHA-256',
       },
@@ -213,36 +210,57 @@ async function testSign({ name,
       message: /Unable to use this key to sign/
     });
 
-  // Test failure when no sign usage
-  await assert.rejects(
-    subtle.sign({ name, hash }, noSignPrivateKey, plaintext), {
-      message: /Unable to use this key to sign/
-    });
-
   // Test failure when using the wrong algorithms
   await assert.rejects(
     subtle.sign({ name, hash }, hmacKey, plaintext), {
-      message: /Unable to use this key to sign/
+      message: /Key algorithm mismatch/
     });
 
   await assert.rejects(
     subtle.sign({ name, hash }, rsaKeys.privateKey, plaintext), {
-      message: /Unable to use this key to sign/
+      message: /Key algorithm mismatch/
     });
 
   await assert.rejects(
     subtle.sign({ name, hash }, okpKeys.privateKey, plaintext), {
-      message: /Unable to use this key to sign/
+      message: /Key algorithm mismatch/
     });
 }
 
 (async function() {
   const variations = [];
 
-  vectors.forEach((vector) => {
+  for (let i = 0; i < vectors.length; ++i) {
+    const vector = vectors[i];
+    if (rejectsSha1Signing && vector.hash === 'SHA-1') {
+      const publicKey = await subtle.importKey(
+        'spki',
+        vector.publicKeyBuffer,
+        { name: vector.name, namedCurve: vector.namedCurve },
+        false,
+        ['verify']);
+      const privateKey = await subtle.importKey(
+        'pkcs8',
+        vector.privateKeyBuffer,
+        { name: vector.name, namedCurve: vector.namedCurve },
+        false,
+        ['sign']);
+      assert(await subtle.verify(
+        { name: vector.name, hash: vector.hash },
+        publicKey,
+        vector.signature,
+        vector.plaintext));
+      await assert.rejects(
+        subtle.sign(
+          { name: vector.name, hash: vector.hash },
+          privateKey,
+          vector.plaintext),
+        { name: 'OperationError' });
+      continue;
+    }
     variations.push(testVerify(vector));
     variations.push(testSign(vector));
-  });
+  }
 
   await Promise.all(variations);
 })().then(common.mustCall());

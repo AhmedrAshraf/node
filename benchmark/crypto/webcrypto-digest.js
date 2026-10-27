@@ -1,24 +1,21 @@
 'use strict';
 
 const common = require('../common.js');
-const {
-  createHash,
-  webcrypto,
-} = require('crypto');
-const { subtle } = webcrypto;
+const { createHash } = require('crypto');
+const { subtle } = globalThis.crypto;
 
 const bench = common.createBenchmark(main, {
   sync: ['createHash', 'subtle'],
   data: [10, 20, 50, 100],
   method: ['SHA-1', 'SHA-256', 'SHA-384', 'SHA-512'],
-  n: [1e3],
+  n: [1e5],
 });
 
 const kMethods = {
   'SHA-1': 'sha1',
   'SHA-256': 'sha256',
   'SHA-384': 'sha384',
-  'SHA-512': 'sha512'
+  'SHA-512': 'sha512',
 };
 
 // This benchmark only looks at clock time and ignores factors
@@ -36,8 +33,6 @@ function measureLegacy(n, data, method) {
 }
 
 function measureSubtle(n, data, method) {
-  const ec = new TextEncoder();
-  data = ec.encode(data);
   const jobs = new Array(n);
   bench.start();
   for (let i = 0; i < n; i++)
@@ -48,7 +43,7 @@ function measureSubtle(n, data, method) {
 }
 
 function main({ n, sync, data, method }) {
-  data = webcrypto.getRandomValues(Buffer.alloc(data));
+  data = globalThis.crypto.getRandomValues(Buffer.alloc(data));
   switch (sync) {
     case 'createHash': return measureLegacy(n, data, method);
     case 'subtle': return measureSubtle(n, data, method);

@@ -80,27 +80,20 @@ assert.throws(() => tls.createServer({ ticketKeys: Buffer.alloc(0) }), {
   message: /The property 'options\.ticketKeys' must be exactly 48 bytes/
 });
 
-assert.throws(
-  () => tls.createSecurePair({}),
-  {
-    message: 'context must be a SecureContext',
-    code: 'ERR_TLS_INVALID_CONTEXT',
-    name: 'TypeError',
-  }
-);
-
 {
-  const buffer = Buffer.from('abcd');
+  const buffer = Buffer.from([3, 0x61, 0x62, 0x63]);
   const out = {};
   tls.convertALPNProtocols(buffer, out);
-  out.ALPNProtocols.write('efgh');
-  assert(buffer.equals(Buffer.from('abcd')));
-  assert(out.ALPNProtocols.equals(Buffer.from('efgh')));
+  out.ALPNProtocols.write('def', 1);
+  assert(buffer.equals(Buffer.from([3, 0x61, 0x62, 0x63])));
+  assert(out.ALPNProtocols.equals(Buffer.from([3, 0x64, 0x65, 0x66])));
 }
 
 {
-  const arrayBufferViewStr = 'abcd';
-  const inputBuffer = Buffer.from(arrayBufferViewStr.repeat(8), 'utf8');
+  const inputBuffer = Buffer.concat([
+    Buffer.from([31]),
+    Buffer.alloc(31, 0x61),
+  ]);
   for (const expectView of common.getArrayBufferViews(inputBuffer)) {
     const out = {};
     const expected = Buffer.from(expectView.buffer.slice(),
@@ -135,3 +128,12 @@ assert.throws(() => { tls.createSecureContext({ maxVersion: 'fhqwhgads' }); },
                 code: 'ERR_TLS_INVALID_PROTOCOL_VERSION',
                 name: 'TypeError'
               });
+
+for (const checkServerIdentity of [undefined, null, 1, true]) {
+  assert.throws(() => {
+    tls.connect({ checkServerIdentity });
+  }, {
+    code: 'ERR_INVALID_ARG_TYPE',
+    name: 'TypeError',
+  });
+}

@@ -70,6 +70,7 @@ class V8_EXPORT_PRIVATE BranchElimination final
   Reduction ReduceStart(Node* node);
   Reduction ReduceOtherControl(Node* node);
   void SimplifyBranchCondition(Node* branch);
+  bool TryEliminateBranchWithPhiCondition(Node* branch, Node* phi, Node* merge);
   Reduction UpdateStatesHelper(Node* node,
                                ControlPathConditions prev_conditions,
                                Node* current_condition, Node* current_branch,
@@ -81,7 +82,7 @@ class V8_EXPORT_PRIVATE BranchElimination final
   }
 
   Node* dead() const { return dead_; }
-  Graph* graph() const;
+  TFGraph* graph() const;
   JSGraph* jsgraph() const { return jsgraph_; }
   Isolate* isolate() const;
   CommonOperatorBuilder* common() const;

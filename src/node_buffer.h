@@ -29,7 +29,7 @@ namespace node {
 
 namespace Buffer {
 
-static const size_t kMaxLength = v8::TypedArray::kMaxLength;
+static const size_t kMaxLength = v8::Uint8Array::kMaxLength;
 
 typedef void (*FreeCallback)(char* data, void* hint);
 
@@ -53,14 +53,16 @@ NODE_EXTERN v8::MaybeLocal<v8::Object> New(v8::Isolate* isolate,
                                            v8::Local<v8::String> string,
                                            enum encoding enc = UTF8);
 
-// public constructor - data is used, callback is passed data on object gc
+// public constructor - data is used, callback is passed data on object gc.
+// If V8 is built with its sandbox, data is copied instead and callback runs
+// on the next turn of the event loop.
 NODE_EXTERN v8::MaybeLocal<v8::Object> New(v8::Isolate* isolate,
                                            char* data,
                                            size_t length,
                                            FreeCallback callback,
                                            void* hint);
 
-// public constructor - data is used.
+// public constructor - data is used, or copied and freed under the V8 sandbox.
 NODE_EXTERN v8::MaybeLocal<v8::Object> New(v8::Isolate* isolate,
                                            char* data,
                                            size_t len);

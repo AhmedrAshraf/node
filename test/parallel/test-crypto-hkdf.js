@@ -13,6 +13,7 @@ const {
   hkdfSync,
   getHashes
 } = require('crypto');
+const { isBoringSSL } = require('../common/crypto');
 
 {
   assert.throws(() => hkdf(), {
@@ -107,6 +108,23 @@ const {
     code: 'ERR_OUT_OF_RANGE'
   });
 
+  {
+    const info = new Uint8Array(2048);
+    Object.defineProperty(info, 'byteLength', {
+      __proto__: null,
+      get() {
+        return 1;
+      },
+    });
+
+    const calls = [
+      () => hkdf('sha256', 'a', '', info, 10, common.mustNotCall()),
+      () => hkdfSync('sha256', 'a', '', info, 10),
+    ];
+    for (const call of calls)
+      assert.throws(call, { code: 'ERR_OUT_OF_RANGE' });
+  }
+
   assert.throws(
     () => hkdf('sha512', 'a', '', '', 64 * 255 + 1, common.mustNotCall()), {
       code: 'ERR_CRYPTO_INVALID_KEYLEN'
@@ -119,14 +137,11 @@ const {
 }
 
 const algorithms = [
-  ['sha256', 'secret', 'salt', 'info', 10],
+  ['sha256', '0123456789abcdef', '0123456789abcdef', 'info', 10],
   ['sha256', '', '', '', 10],
   ['sha256', '', 'salt', '', 10],
   ['sha512', 'secret', 'salt', '', 15],
 ];
-if (!common.hasOpenSSL3)
-  algorithms.push(['whirlpool', 'secret', '', 'info', 20]);
-
 algorithms.forEach(([ hash, secret, salt, info, length ]) => {
   {
     const syncResult = hkdfSync(hash, secret, salt, info, length);
@@ -215,11 +230,10 @@ algorithms.forEach(([ hash, secret, salt, info, length ]) => {
 });
 
 
-if (!common.hasOpenSSL3) {
+if (isBoringSSL) {
   const kKnownUnsupported = ['shake128', 'shake256'];
-  getHashes()
-    .filter((hash) => !kKnownUnsupported.includes(hash))
-    .forEach((hash) => {
-      assert(hkdfSync(hash, 'key', 'salt', 'info', 5));
-    });
+  for (const hash of getHashes()) {
+    if (kKnownUnsupported.includes(hash)) continue;
+    assert(hkdfSync(hash, 'key', 'salt', 'info', 5));
+  }
 }

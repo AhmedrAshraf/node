@@ -1,9 +1,10 @@
+// Flags: --expose-internals --no-warnings
 'use strict';
 
 const common = require('../common');
 const assert = require('assert');
 const http = require('http');
-const { HTTPParser } = require('_http_common');
+const { HTTPParser } = require('internal/http/common');
 
 // Test that the `HTTPParser` instance is cleaned up before being returned to
 // the pool to avoid memory retention issues.
@@ -25,18 +26,24 @@ server.on('request', common.mustCall((request, response) => {
 }));
 
 server.listen(common.mustCall(() => {
-  const request = http.get({ port: server.address().port });
+  const request = http.get({
+    headers: { Connection: 'close' },
+    port: server.address().port,
+    joinDuplicateHeaders: true
+  });
   let parser;
 
   request.on('socket', common.mustCall(() => {
     parser = request.parser;
     assert.strictEqual(typeof parser.onIncoming, 'function');
+    assert.strictEqual(parser.joinDuplicateHeaders, true);
   }));
 
   request.on('response', common.mustCall((response) => {
     response.resume();
     response.on('end', common.mustCall(() => {
       assert.strictEqual(parser.onIncoming, null);
+      assert.strictEqual(parser.joinDuplicateHeaders, null);
     }));
   }));
 }));

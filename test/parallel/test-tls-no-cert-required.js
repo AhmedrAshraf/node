@@ -20,7 +20,9 @@
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 'use strict';
+
 const common = require('../common');
+const { isBoringSSL } = require('../common/crypto');
 if (!common.hasCrypto)
   common.skip('missing crypto');
 
@@ -28,10 +30,15 @@ const assert = require('assert');
 const tls = require('tls');
 
 // Omitting the cert or pfx option to tls.createServer() should not throw.
-// AECDH-NULL-SHA is a no-authentication/no-encryption cipher and hence
-// doesn't need a certificate.
-tls.createServer({ ciphers: 'AECDH-NULL-SHA' })
-  .listen(0, common.mustCall(close));
+if (isBoringSSL) {
+  // AECDH-NULL-SHA is a no-authentication/no-encryption cipher and hence
+  // does not need a certificate. BoringSSL does not provide that anonymous
+  // cipher suite, so only this cipher-specific no-cert case is skipped.
+  common.printSkipMessage('BoringSSL: skipping anonymous AECDH-NULL-SHA case');
+} else {
+  tls.createServer({ ciphers: 'AECDH-NULL-SHA' })
+    .listen(0, common.mustCall(close));
+}
 
 tls.createServer(assert.fail)
   .listen(0, common.mustCall(close));

@@ -50,6 +50,11 @@ void ReqWrap<T>::Cancel() {
 }
 
 template <typename T>
+bool ReqWrap<T>::IsDispatched() {
+  return req_.data != nullptr;
+}
+
+template <typename T>
 AsyncWrap* ReqWrap<T>::GetAsyncWrap() {
   return this;
 }
@@ -106,8 +111,7 @@ struct CallLibuvFunction<ReqT, void(*)(ReqT*, Args...)> {
 template <typename ReqT, typename T>
 struct MakeLibuvRequestCallback {
   static T For(ReqWrap<ReqT>* req_wrap, T v) {
-    static_assert(!is_callable<T>::value,
-                  "MakeLibuvRequestCallback missed a callback");
+    static_assert(!IsCallable<T>, "MakeLibuvRequestCallback missed a callback");
     return v;
   }
 };

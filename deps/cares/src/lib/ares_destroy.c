@@ -1,113 +1,224 @@
-
-/* Copyright 1998 by the Massachusetts Institute of Technology.
- * Copyright (C) 2004-2011 by Daniel Stenberg
+/* MIT License
  *
- * Permission to use, copy, modify, and distribute this
- * software and its documentation for any purpose and without
- * fee is hereby granted, provided that the above copyright
- * notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting
- * documentation, and that the name of M.I.T. not be used in
- * advertising or publicity pertaining to distribution of the
- * software without specific, written prior permission.
- * M.I.T. makes no representations about the suitability of
- * this software for any purpose.  It is provided "as is"
- * without express or implied warranty.
+ * Copyright (c) 1998 Massachusetts Institute of Technology
+ * Copyright (c) 2004 Daniel Stenberg
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
  */
 
-#include "ares_setup.h"
-
+#include "ares_private.h"
+#include "event/ares_event.h"
 #include <assert.h>
 
-#include "ares.h"
-#include "ares_private.h"
-
-void ares_destroy_options(struct ares_options *options)
+void ares_destroy(ares_channel_t *channel)
 {
-  int i;
+  size_t             i;
+  ares_llist_node_t *node = NULL;
 
-  if(options->servers)
-    ares_free(options->servers);
-  for (i = 0; i < options->ndomains; i++)
-    ares_free(options->domains[i]);
-  if(options->domains)
-    ares_free(options->domains);
-  if(options->sortlist)
-    ares_free(options->sortlist);
-  if(options->lookups)
-    ares_free(options->lookups);
-  if(options->resolvconf_path)
-    ares_free(options->resolvconf_path);
-}
-
-void ares_destroy(ares_channel channel)
-{
-  int i;
-  struct query *query;
-  struct list_node* list_head;
-  struct list_node* list_node;
-
-  if (!channel)
+  if (channel == NULL) {
     return;
+  }
 
-  list_head = &(channel->all_queries);
-  for (list_node = list_head->next; list_node != list_head; )
-    {
-      query = list_node->data;
-      list_node = list_node->next;  /* since we're deleting the query */
-      query->callback(query->arg, ARES_EDESTRUCTION, 0, NULL, 0);
-      ares__free_query(query);
+  /* Mark as being shutdown */
+  ares_channel_lock(channel);
+  channel->sys_up = ARES_FALSE;
+  ares_channel_unlock(channel);
+
+  /* Disable configuration change monitoring.  We can't hold a lock because
+   * some cleanup routines, such as on Windows, are synchronous operations.
+   * What we've observed is a system config change event was triggered right
+   * at shutdown time and it tries to take the channel lock and the destruction
+   * waits for that event to complete before it continues so we get a channel
+   * lock deadlock at shutdown if we hold a lock during this process. */
+  if (channel->optmask & ARES_OPT_EVENT_THREAD) {
+    ares_event_thread_t *e = channel->sock_state_cb_data;
+    if (e && e->configchg) {
+      ares_event_configchg_destroy(e->configchg);
+      e->configchg = NULL;
     }
+  }
+
+  /* Wait for reinit thread to exit if there was one pending, can't be
+   * holding a lock as the thread may take locks. */
+  if (channel->reinit_thread != NULL) {
+    void *rv;
+    ares_thread_join(channel->reinit_thread, &rv);
+    channel->reinit_thread = NULL;
+  }
+
+  /* Lock because callbacks will be triggered, and any system-generated
+   * callbacks need to hold a channel lock. */
+  ares_channel_lock(channel);
+
+  /* Destroy all queries.
+   *
+   * The queries are detached before their callbacks run.  Claiming the node
+   * only unlinks a query from all_queries; it stays in queries_by_qid, on
+   * conn->queries_to_conn and in queries_by_timeout.  A reentrant teardown
+   * from inside the callback -- ares_set_servers_csv(), or a new query
+   * hitting a connection error -- would otherwise still find the query, end
+   * it a second time (invoking the application callback twice for one
+   * lookup) and free it, and the ares_free_query() below would double-free.
+   *
+   * The loop re-reads the first node each iteration rather than caching the
+   * next one, since a callback can cause other queries in this same list to
+   * be ended and their nodes destroyed.  No list swap is needed: sys_up is
+   * already cleared above, so ares_send_nolock() refuses new queries and
+   * nothing can be added while we drain. */
+  while ((node = ares_llist_node_first(channel->all_queries)) != NULL) {
+    ares_query_t *query = ares_llist_node_claim(node);
+
+    /* Must come first: node_claim() already destroyed this node, so
+     * ares_detach_query() would otherwise destroy it a second time. */
+    query->node_all_queries = NULL;
+    ares_detach_query(query);
+
+    query->callback(query->arg, ARES_EDESTRUCTION, 0, NULL);
+    ares_free_query(query);
+  }
+
+  ares_queue_notify_empty(channel);
+
 #ifndef NDEBUG
   /* Freeing the query should remove it from all the lists in which it sits,
    * so all query lists should be empty now.
    */
-  assert(ares__is_list_empty(&(channel->all_queries)));
-  for (i = 0; i < ARES_QID_TABLE_SIZE; i++)
-    {
-      assert(ares__is_list_empty(&(channel->queries_by_qid[i])));
-    }
-  for (i = 0; i < ARES_TIMEOUT_TABLE_SIZE; i++)
-    {
-      assert(ares__is_list_empty(&(channel->queries_by_timeout[i])));
-    }
+  assert(ares_llist_len(channel->all_queries) == 0);
+  assert(ares_htable_szvp_num_keys(channel->queries_by_qid) == 0);
+  assert(ares_slist_len(channel->queries_by_timeout) == 0);
 #endif
 
-  ares__destroy_servers_state(channel);
+  /* Tearing down the servers closes every remaining connection.  Applications
+   * rely on being told about those closures so they can drop the descriptors
+   * from their own event loop, so the notifications are still delivered here
+   * rather than discarded -- just after the teardown instead of during it. */
+  ares_deferred_cb_enter(channel);
+  ares_destroy_servers_state(channel);
+  ares_deferred_cb_leave(channel);
+
+  /* The leave above delivered and destroyed both queues and reclaimed
+   * everything the teardown unlinked, so these are normally no-ops.  They are
+   * not redundant: if the first insert into a freshly created queue fails,
+   * the array is left allocated and empty, the flush loop never runs because
+   * both queues are empty, and nothing else would ever free it. */
+  ares_array_destroy(channel->sock_state_queue);
+  channel->sock_state_queue = NULL;
+  ares_array_destroy(channel->server_state_queue);
+  channel->server_state_queue = NULL;
+
+#ifndef NDEBUG
+  assert(channel->pending_servers == NULL);
+  assert(channel->pending_conns == NULL);
+#endif
+
+#ifndef NDEBUG
+  assert(ares_htable_asvp_num_keys(channel->connnode_by_socket) == 0);
+#endif
+
+  /* No more callbacks will be triggered after this point, unlock */
+  ares_channel_unlock(channel);
+
+  /* Shut down the event thread */
+  if (channel->optmask & ARES_OPT_EVENT_THREAD) {
+    ares_event_thread_destroy(channel);
+  }
 
   if (channel->domains) {
-    for (i = 0; i < channel->ndomains; i++)
+    for (i = 0; i < channel->ndomains; i++) {
       ares_free(channel->domains[i]);
+    }
     ares_free(channel->domains);
   }
 
-  if(channel->sortlist)
-    ares_free(channel->sortlist);
+  ares_llist_destroy(channel->all_queries);
+  ares_slist_destroy(channel->queries_by_timeout);
+  ares_htable_szvp_destroy(channel->queries_by_qid);
+  ares_htable_asvp_destroy(channel->connnode_by_socket);
 
-  if (channel->lookups)
-    ares_free(channel->lookups);
+  ares_free(channel->sortlist);
+  ares_free(channel->lookups);
+  ares_free(channel->resolvconf_path);
+  ares_free(channel->hosts_path);
+  ares_destroy_rand_state(channel->rand_state);
 
-  if (channel->resolvconf_path)
-    ares_free(channel->resolvconf_path);
+  ares_hosts_file_destroy(channel->hf);
+
+  ares_qcache_destroy(channel->qcache);
+
+  ares_channel_threading_destroy(channel);
 
   ares_free(channel);
 }
 
-void ares__destroy_servers_state(ares_channel channel)
+/*! Release a server's memory.  Split from ares_destroy_server() for the same
+ *  reason ares_conn_reap() is split out: a caller further up the stack may
+ *  still hold this pointer. */
+void ares_server_reap(ares_server_t *server)
 {
-  struct server_state *server;
-  int i;
+  if (server == NULL) {
+    return; /* LCOV_EXCL_LINE: DefensiveCoding */
+  }
 
-  if (channel->servers)
-    {
-      for (i = 0; i < channel->nservers; i++)
-        {
-          server = &channel->servers[i];
-          ares__close_sockets(channel, server);
-          assert(ares__is_list_empty(&server->queries_to_server));
-        }
-      ares_free(channel->servers);
-      channel->servers = NULL;
-    }
-  channel->nservers = -1;
+  ares_llist_destroy(server->connections);
+  ares_free(server);
+}
+
+void ares_destroy_server(ares_server_t *server)
+{
+  ares_channel_t *channel;
+
+  if (server == NULL) {
+    return; /* LCOV_EXCL_LINE: DefensiveCoding */
+  }
+
+  channel = server->channel;
+
+  /* Closes and unlinks every connection; each is deferred or reaped by
+   * ares_close_connection() on the same rule applied below. */
+  ares_close_sockets(server);
+
+  /* The caller has already unlinked this server from channel->servers, so it
+   * can no longer be found -- ares_server_in_channel() and
+   * ares_slist_node_find() both report it gone, which is what callers check
+   * before acting on one.  But a library call in progress may still be
+   * holding the pointer, so keep it readable until that call unwinds. */
+  if (channel != NULL && channel->deferred_cb_depth > 0) {
+    server->next_pending     = channel->pending_servers;
+    channel->pending_servers = server;
+    return;
+  }
+
+  ares_server_reap(server);
+}
+
+void ares_destroy_servers_state(ares_channel_t *channel)
+{
+  ares_slist_node_t *node;
+
+  while ((node = ares_slist_node_first(channel->servers)) != NULL) {
+    ares_server_t *server = ares_slist_node_claim(node);
+    ares_destroy_server(server);
+  }
+
+  ares_slist_destroy(channel->servers);
+  channel->servers = NULL;
 }

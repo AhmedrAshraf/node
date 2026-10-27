@@ -1,13 +1,14 @@
 import { skipIfInspectorDisabled } from '../common/index.mjs';
 skipIfInspectorDisabled();
 
-import { path } from '../common/fixtures.mjs';
+// This must be in sequential because we check that the default port is 9229.
+import * as fixtures from '../common/fixtures.mjs';
 import startCLI from '../common/debugger.js';
 
 import assert from 'assert';
 
-const script = path('debugger', 'three-lines.js');
-const cli = startCLI([script]);
+const script = fixtures.path('debugger', 'three-lines.js');
+const cli = startCLI([script], [], {}, { randomPort: false });
 try {
   await cli.waitForInitialBreak();
   await cli.waitForPrompt();

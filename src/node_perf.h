@@ -63,6 +63,7 @@ inline PerformanceEntryType ToPerformanceEntryTypeEnum(
 enum PerformanceGCKind {
   NODE_PERFORMANCE_GC_MAJOR = v8::GCType::kGCTypeMarkSweepCompact,
   NODE_PERFORMANCE_GC_MINOR = v8::GCType::kGCTypeScavenge,
+  NODE_PERFORMANCE_GC_MINOR_MARK_SWEEP = v8::GCType::kGCTypeMinorMarkSweep,
   NODE_PERFORMANCE_GC_INCREMENTAL = v8::GCType::kGCTypeIncrementalMarking,
   NODE_PERFORMANCE_GC_WEAKCB = v8::GCType::kGCTypeProcessWeakCallbacks
 };
@@ -124,12 +125,12 @@ struct PerformanceEntry {
     }
 
     v8::Local<v8::Value> argv[] = {
-      OneByteString(env->isolate(), name.c_str()),
-      OneByteString(env->isolate(), GetPerformanceEntryTypeName(Traits::kType)),
-      v8::Number::New(env->isolate(), start_time),
-      v8::Number::New(env->isolate(), duration),
-      detail
-    };
+        OneByteString(env->isolate(), name),
+        OneByteString(env->isolate(),
+                      GetPerformanceEntryTypeName(Traits::kType)),
+        v8::Number::New(env->isolate(), start_time),
+        v8::Number::New(env->isolate(), duration),
+        detail};
 
     node::MakeSyncCallback(
         env->isolate(),

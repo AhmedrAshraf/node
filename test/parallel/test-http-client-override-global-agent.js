@@ -3,7 +3,7 @@ const common = require('../common');
 const assert = require('assert');
 const http = require('http');
 
-const server = http.Server(common.mustCall((req, res) => {
+const server = new http.Server(common.mustCall((req, res) => {
   res.writeHead(200);
   res.end('Hello, World!');
 }));
@@ -21,8 +21,8 @@ function makeRequest() {
   const req = http.get({
     port: server.address().port
   });
-  req.on('close', () => {
+  req.on('close', common.mustCall(() => {
     assert.strictEqual(req.destroyed, true);
     server.close();
-  });
+  }));
 }

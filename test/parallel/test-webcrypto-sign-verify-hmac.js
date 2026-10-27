@@ -6,7 +6,9 @@ if (!common.hasCrypto)
   common.skip('missing crypto');
 
 const assert = require('assert');
-const { subtle } = require('crypto').webcrypto;
+const { getFips } = require('crypto');
+const { isBoringSSL } = require('../common/crypto');
+const { subtle } = globalThis.crypto;
 
 const vectors = require('../fixtures/crypto/hmac')();
 
@@ -31,11 +33,11 @@ async function testVerify({ hash,
       keyBuffer,
       { name, hash },
       false,
-      [ /* No usages */ ]),
+      ['sign']),
     subtle.generateKey(
       {
         name: 'RSA-PSS',
-        modulusLength: 1024,
+        modulusLength: getFips() === 1 ? 2048 : 1024,
         publicExponent: new Uint8Array([1, 0, 1]),
         hash: 'SHA-256',
       },
@@ -62,7 +64,7 @@ async function testVerify({ hash,
   // Test failure when using the wrong algorithms
   await assert.rejects(
     subtle.verify({ name, hash }, rsaKeys.publicKey, signature, plaintext), {
-      message: /Unable to use this key to verify/
+      message: /Key algorithm mismatch/
     });
 
   // Test failure when signature is altered
@@ -91,16 +93,14 @@ async function testVerify({ hash,
   // Test failure when wrong hash is used
   {
     const otherhash = hash === 'SHA-1' ? 'SHA-256' : 'SHA-1';
-    assert(!(await subtle.verify({
-      name,
-      hash: otherhash
-    }, key, signature, copy)));
+    const keyWithOtherHash = await subtle.importKey(
+      'raw',
+      keyBuffer,
+      { name, hash: otherhash },
+      false,
+      ['verify']);
+    assert(!(await subtle.verify({ name }, keyWithOtherHash, signature, plaintext)));
   }
-
-  await assert.rejects(
-    subtle.verify({ name, hash: 'sha256' }, key, signature, copy), {
-      message: /Unrecognized name/
-    });
 }
 
 async function testSign({ hash,
@@ -128,7 +128,7 @@ async function testSign({ hash,
     subtle.generateKey(
       {
         name: 'RSA-PSS',
-        modulusLength: 1024,
+        modulusLength: getFips() === 1 ? 2048 : 1024,
         publicExponent: new Uint8Array([1, 0, 1]),
         hash: 'SHA-256',
       },
@@ -156,7 +156,6 @@ async function testSign({ hash,
     subtle.generateKey({ name }, false, ['sign', 'verify']), {
       name: 'TypeError',
       code: 'ERR_MISSING_OPTION',
-      message: 'algorithm.hash is required'
     });
 
   // Test failure when no sign usage
@@ -168,17 +167,21 @@ async function testSign({ hash,
   // Test failure when using the wrong algorithms
   await assert.rejects(
     subtle.sign({ name, hash }, rsaKeys.privateKey, plaintext), {
-      message: /Unable to use this key to sign/
+      message: /Key algorithm mismatch/
     });
 }
 
 (async function() {
   const variations = [];
 
-  vectors.forEach((vector) => {
+  for (const vector of vectors) {
+    // The shared fixtures also cover node:crypto; WebCrypto only supports
+    // SHA-3 for digest operations in BoringSSL.
+    if (isBoringSSL && vector.hash.startsWith('SHA3-'))
+      continue;
     variations.push(testVerify(vector));
     variations.push(testSign(vector));
-  });
+  }
 
   await Promise.all(variations);
 })().then(common.mustCall());

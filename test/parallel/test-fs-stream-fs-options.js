@@ -1,8 +1,7 @@
 'use strict';
 
-require('../common');
+const common = require('../common');
 const fixtures = require('../common/fixtures');
-const path = require('path');
 const fs = require('fs');
 const assert = require('assert');
 
@@ -15,7 +14,7 @@ const readStreamOptions = [...streamOpts, 'read'];
 const originalFs = { fs };
 
 {
-  const file = path.join(tmpdir.path, 'write-end-test0.txt');
+  const file = tmpdir.resolve('write-end-test0.txt');
 
   writeStreamOptions.forEach((fn) => {
     const overrideFs = Object.assign({}, originalFs.fs, { [fn]: null });
@@ -37,7 +36,7 @@ const originalFs = { fs };
 }
 
 {
-  const file = path.join(tmpdir.path, 'write-end-test0.txt');
+  const file = tmpdir.resolve('write-end-test0.txt');
   const overrideFs = Object.assign({}, originalFs.fs, { writev: 'not a fn' });
   const opts = {
     fs: overrideFs
@@ -70,4 +69,18 @@ const originalFs = { fs };
       `createReadStream options.fs.${fn} should throw if isn't a function`
     );
   });
+}
+
+for (const createStream of [fs.createReadStream, fs.createWriteStream]) {
+  const stream = createStream(null, {
+    fd: 0,
+    fs: {
+      ...fs,
+      close: common.mustCall((fd, callback) => {
+        assert.strictEqual(fd, 0);
+        callback(null);
+      }),
+    },
+  });
+  stream.destroy();
 }

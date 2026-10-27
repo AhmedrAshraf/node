@@ -65,17 +65,15 @@ It is possible to create multiple derived
 classes by providing additional arguments. The other ones will be exposed as
 properties of the main class:
 
-<!-- eslint-disable no-unreachable -->
-
 ```js
 E('EXAMPLE_KEY', 'Error message', TypeError, RangeError);
 
 // In another module
+const assert = require('node:assert');
 const { EXAMPLE_KEY } = require('internal/errors').codes;
-// TypeError
-throw new EXAMPLE_KEY();
-// RangeError
-throw new EXAMPLE_KEY.RangeError();
+
+assert.throws(() => { throw new EXAMPLE_KEY(); }, { name: 'TypeError' });
+assert.throws(() => { throw new EXAMPLE_KEY.RangeError(); }, { name: 'RangeError' });
 ```
 
 ## Documenting new errors
@@ -84,6 +82,9 @@ Whenever a new static error code is added and used, corresponding documentation
 for the error code should be added to the `doc/api/errors.md` file. This will
 give users a place to go to easily look up the meaning of individual error
 codes.
+
+In case `make lint` fails to detect the new error codes added into `errors.md`,
+the markdown linting cache must be cleaned with `make lint-clean`.
 
 ## Testing new errors
 

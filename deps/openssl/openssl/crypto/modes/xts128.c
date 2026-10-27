@@ -1,5 +1,5 @@
 /*
- * Copyright 2011-2020 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2011-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -13,23 +13,23 @@
 #include "crypto/modes.h"
 
 #ifndef STRICT_ALIGNMENT
-# ifdef __GNUC__
-typedef u64 u64_a1 __attribute((__aligned__(1)));
-# else
-typedef u64 u64_a1;
-# endif
+#ifdef __GNUC__
+typedef uint64_t u64_a1 __attribute((__aligned__(1)));
+#else
+typedef uint64_t u64_a1;
+#endif
 #endif
 
 int CRYPTO_xts128_encrypt(const XTS128_CONTEXT *ctx,
-                          const unsigned char iv[16],
-                          const unsigned char *inp, unsigned char *out,
-                          size_t len, int enc)
+    const unsigned char iv[16],
+    const unsigned char *inp, unsigned char *out,
+    size_t len, int enc)
 {
     DECLARE_IS_ENDIAN;
     union {
-        u64 u[2];
-        u32 d[4];
-        u8 c[16];
+        uint64_t u[2];
+        uint32_t d[4];
+        uint8_t c[16];
     } tweak, scratch;
     unsigned int i;
 
@@ -38,7 +38,7 @@ int CRYPTO_xts128_encrypt(const XTS128_CONTEXT *ctx,
 
     memcpy(tweak.c, iv, 16);
 
-    (*ctx->block2) (tweak.c, tweak.c, ctx->key2);
+    (*ctx->block2)(tweak.c, tweak.c, ctx->key2);
 
     if (!enc && (len % 16))
         len -= 16;
@@ -52,7 +52,7 @@ int CRYPTO_xts128_encrypt(const XTS128_CONTEXT *ctx,
         scratch.u[0] = ((u64_a1 *)inp)[0] ^ tweak.u[0];
         scratch.u[1] = ((u64_a1 *)inp)[1] ^ tweak.u[1];
 #endif
-        (*ctx->block1) (scratch.c, scratch.c, ctx->key1);
+        (*ctx->block1)(scratch.c, scratch.c, ctx->key1);
 #if defined(STRICT_ALIGNMENT)
         scratch.u[0] ^= tweak.u[0];
         scratch.u[1] ^= tweak.u[1];
@@ -83,28 +83,28 @@ int CRYPTO_xts128_encrypt(const XTS128_CONTEXT *ctx,
                  * + substitutes for |, because c is 1 bit
                  */
                 c += ((size_t)tweak.c[i]) << 1;
-                tweak.c[i] = (u8)c;
+                tweak.c[i] = (uint8_t)c;
                 c = c >> 8;
             }
-            tweak.c[0] ^= (u8)(0x87 & (0 - c));
+            tweak.c[0] ^= (uint8_t)(0x87 & (0 - c));
         }
     }
     if (enc) {
         for (i = 0; i < len; ++i) {
-            u8 c = inp[i];
+            uint8_t c = inp[i];
             out[i] = scratch.c[i];
             scratch.c[i] = c;
         }
         scratch.u[0] ^= tweak.u[0];
         scratch.u[1] ^= tweak.u[1];
-        (*ctx->block1) (scratch.c, scratch.c, ctx->key1);
+        (*ctx->block1)(scratch.c, scratch.c, ctx->key1);
         scratch.u[0] ^= tweak.u[0];
         scratch.u[1] ^= tweak.u[1];
         memcpy(out - 16, scratch.c, 16);
     } else {
         union {
-            u64 u[2];
-            u8 c[16];
+            uint64_t u[2];
+            uint8_t c[16];
         } tweak1;
 
         if (IS_LITTLE_ENDIAN) {
@@ -122,10 +122,10 @@ int CRYPTO_xts128_encrypt(const XTS128_CONTEXT *ctx,
                  * + substitutes for |, because c is 1 bit
                  */
                 c += ((size_t)tweak.c[i]) << 1;
-                tweak1.c[i] = (u8)c;
+                tweak1.c[i] = (uint8_t)c;
                 c = c >> 8;
             }
-            tweak1.c[0] ^= (u8)(0x87 & (0 - c));
+            tweak1.c[0] ^= (uint8_t)(0x87 & (0 - c));
         }
 #if defined(STRICT_ALIGNMENT)
         memcpy(scratch.c, inp, 16);
@@ -135,18 +135,18 @@ int CRYPTO_xts128_encrypt(const XTS128_CONTEXT *ctx,
         scratch.u[0] = ((u64_a1 *)inp)[0] ^ tweak1.u[0];
         scratch.u[1] = ((u64_a1 *)inp)[1] ^ tweak1.u[1];
 #endif
-        (*ctx->block1) (scratch.c, scratch.c, ctx->key1);
+        (*ctx->block1)(scratch.c, scratch.c, ctx->key1);
         scratch.u[0] ^= tweak1.u[0];
         scratch.u[1] ^= tweak1.u[1];
 
         for (i = 0; i < len; ++i) {
-            u8 c = inp[16 + i];
+            uint8_t c = inp[16 + i];
             out[16 + i] = scratch.c[i];
             scratch.c[i] = c;
         }
         scratch.u[0] ^= tweak.u[0];
         scratch.u[1] ^= tweak.u[1];
-        (*ctx->block1) (scratch.c, scratch.c, ctx->key1);
+        (*ctx->block1)(scratch.c, scratch.c, ctx->key1);
 #if defined(STRICT_ALIGNMENT)
         scratch.u[0] ^= tweak.u[0];
         scratch.u[1] ^= tweak.u[1];

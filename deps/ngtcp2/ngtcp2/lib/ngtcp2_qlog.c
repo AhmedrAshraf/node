@@ -30,6 +30,8 @@
 #include "ngtcp2_vec.h"
 #include "ngtcp2_conv.h"
 #include "ngtcp2_net.h"
+#include "ngtcp2_unreachable.h"
+#include "ngtcp2_conn_stat.h"
 
 void ngtcp2_qlog_init(ngtcp2_qlog *qlog, ngtcp2_qlog_write write,
                       ngtcp2_tstamp ts, void *user_data) {
@@ -38,7 +40,7 @@ void ngtcp2_qlog_init(ngtcp2_qlog *qlog, ngtcp2_qlog_write write,
   qlog->user_data = user_data;
 }
 
-#define write_verbatim(DEST, S) ngtcp2_cpymem((DEST), (S), sizeof(S) - 1)
+#define write_verbatim(DEST, S) ngtcp2_cpymem((DEST), (S), ngtcp2_strlen_lit(S))
 
 static uint8_t *write_string_impl(uint8_t *p, const uint8_t *data,
                                   size_t datalen) {
@@ -51,17 +53,11 @@ static uint8_t *write_string_impl(uint8_t *p, const uint8_t *data,
 }
 
 #define write_string(DEST, S)                                                  \
-  write_string_impl((DEST), (const uint8_t *)(S), sizeof(S) - 1)
-
-#define NGTCP2_LOWER_XDIGITS "0123456789abcdef"
+  write_string_impl((DEST), (const uint8_t *)(S), ngtcp2_strlen_lit(S))
 
 static uint8_t *write_hex(uint8_t *p, const uint8_t *data, size_t datalen) {
-  const uint8_t *b = data, *end = data + datalen;
   *p++ = '"';
-  for (; b != end; ++b) {
-    *p++ = (uint8_t)NGTCP2_LOWER_XDIGITS[*b >> 4];
-    *p++ = (uint8_t)NGTCP2_LOWER_XDIGITS[*b & 0xf];
-  }
+  p = ngtcp2_encode_hex(p, data, datalen);
   *p++ = '"';
   return p;
 }
@@ -70,38 +66,19 @@ static uint8_t *write_cid(uint8_t *p, const ngtcp2_cid *cid) {
   return write_hex(p, cid->data, cid->datalen);
 }
 
-static uint8_t *write_number(uint8_t *p, uint64_t n) {
-  size_t nlen = 0;
-  uint64_t t;
-  uint8_t *res;
-
-  if (n == 0) {
-    *p++ = '0';
-    return p;
-  }
-  for (t = n; t; t /= 10, ++nlen)
-    ;
-  p += nlen;
-  res = p;
-  for (; n; n /= 10) {
-    *--p = (uint8_t)((n % 10) + '0');
-  }
-  return res;
-}
-
 static uint8_t *write_tstamp(uint8_t *p, ngtcp2_tstamp ts) {
-  return write_number(p, ts / NGTCP2_MILLISECONDS);
+  return ngtcp2_encode_uint(p, ts / NGTCP2_MILLISECONDS);
 }
 
 static uint8_t *write_duration(uint8_t *p, ngtcp2_duration duration) {
-  return write_number(p, duration / NGTCP2_MILLISECONDS);
+  return ngtcp2_encode_uint(p, duration / NGTCP2_MILLISECONDS);
 }
 
 static uint8_t *write_bool(uint8_t *p, int b) {
   if (b) {
-    return ngtcp2_cpymem(p, "true", sizeof("true") - 1);
+    return ngtcp2_cpymem(p, "true", ngtcp2_strlen_lit("true"));
   }
-  return ngtcp2_cpymem(p, "false", sizeof("false") - 1);
+  return ngtcp2_cpymem(p, "false", ngtcp2_strlen_lit("false"));
 }
 
 static uint8_t *write_pair_impl(uint8_t *p, const uint8_t *name, size_t namelen,
@@ -112,7 +89,8 @@ static uint8_t *write_pair_impl(uint8_t *p, const uint8_t *name, size_t namelen,
 }
 
 #define write_pair(DEST, NAME, VALUE)                                          \
-  write_pair_impl((DEST), (const uint8_t *)(NAME), sizeof(NAME) - 1, (VALUE))
+  write_pair_impl((DEST), (const uint8_t *)(NAME), ngtcp2_strlen_lit(NAME),    \
+                  (VALUE))
 
 static uint8_t *write_pair_hex_impl(uint8_t *p, const uint8_t *name,
                                     size_t namelen, const uint8_t *value,
@@ -123,19 +101,19 @@ static uint8_t *write_pair_hex_impl(uint8_t *p, const uint8_t *name,
 }
 
 #define write_pair_hex(DEST, NAME, VALUE, VALUELEN)                            \
-  write_pair_hex_impl((DEST), (const uint8_t *)(NAME), sizeof(NAME) - 1,       \
-                      (VALUE), (VALUELEN))
+  write_pair_hex_impl((DEST), (const uint8_t *)(NAME),                         \
+                      ngtcp2_strlen_lit(NAME), (VALUE), (VALUELEN))
 
 static uint8_t *write_pair_number_impl(uint8_t *p, const uint8_t *name,
                                        size_t namelen, uint64_t value) {
   p = write_string_impl(p, name, namelen);
   *p++ = ':';
-  return write_number(p, value);
+  return ngtcp2_encode_uint(p, value);
 }
 
 #define write_pair_number(DEST, NAME, VALUE)                                   \
-  write_pair_number_impl((DEST), (const uint8_t *)(NAME), sizeof(NAME) - 1,    \
-                         (VALUE))
+  write_pair_number_impl((DEST), (const uint8_t *)(NAME),                      \
+                         ngtcp2_strlen_lit(NAME), (VALUE))
 
 static uint8_t *write_pair_duration_impl(uint8_t *p, const uint8_t *name,
                                          size_t namelen,
@@ -146,8 +124,8 @@ static uint8_t *write_pair_duration_impl(uint8_t *p, const uint8_t *name,
 }
 
 #define write_pair_duration(DEST, NAME, VALUE)                                 \
-  write_pair_duration_impl((DEST), (const uint8_t *)(NAME), sizeof(NAME) - 1,  \
-                           (VALUE))
+  write_pair_duration_impl((DEST), (const uint8_t *)(NAME),                    \
+                           ngtcp2_strlen_lit(NAME), (VALUE))
 
 static uint8_t *write_pair_tstamp_impl(uint8_t *p, const uint8_t *name,
                                        size_t namelen, ngtcp2_tstamp ts) {
@@ -157,8 +135,8 @@ static uint8_t *write_pair_tstamp_impl(uint8_t *p, const uint8_t *name,
 }
 
 #define write_pair_tstamp(DEST, NAME, VALUE)                                   \
-  write_pair_tstamp_impl((DEST), (const uint8_t *)(NAME), sizeof(NAME) - 1,    \
-                         (VALUE))
+  write_pair_tstamp_impl((DEST), (const uint8_t *)(NAME),                      \
+                         ngtcp2_strlen_lit(NAME), (VALUE))
 
 static uint8_t *write_pair_bool_impl(uint8_t *p, const uint8_t *name,
                                      size_t namelen, int b) {
@@ -168,8 +146,8 @@ static uint8_t *write_pair_bool_impl(uint8_t *p, const uint8_t *name,
 }
 
 #define write_pair_bool(DEST, NAME, VALUE)                                     \
-  write_pair_bool_impl((DEST), (const uint8_t *)(NAME), sizeof(NAME) - 1,      \
-                       (VALUE))
+  write_pair_bool_impl((DEST), (const uint8_t *)(NAME),                        \
+                       ngtcp2_strlen_lit(NAME), (VALUE))
 
 static uint8_t *write_pair_cid_impl(uint8_t *p, const uint8_t *name,
                                     size_t namelen, const ngtcp2_cid *cid) {
@@ -179,16 +157,15 @@ static uint8_t *write_pair_cid_impl(uint8_t *p, const uint8_t *name,
 }
 
 #define write_pair_cid(DEST, NAME, VALUE)                                      \
-  write_pair_cid_impl((DEST), (const uint8_t *)(NAME), sizeof(NAME) - 1,       \
-                      (VALUE))
+  write_pair_cid_impl((DEST), (const uint8_t *)(NAME),                         \
+                      ngtcp2_strlen_lit(NAME), (VALUE))
 
-#define ngtcp2_make_vec_lit(S)                                                 \
-  { (uint8_t *)(S), sizeof((S)) - 1 }
+#define ngtcp2_make_vec_lit(S) {(uint8_t *)(S), ngtcp2_strlen_lit((S))}
 
 static uint8_t *write_common_fields(uint8_t *p, const ngtcp2_cid *odcid) {
   p = write_verbatim(
-      p, "\"common_fields\":{\"protocol_type\":[\"QUIC\"],\"time_format\":"
-         "\"relative\",\"reference_time\":0,\"group_id\":");
+    p, "\"common_fields\":{\"protocol_type\":[\"QUIC\"],\"time_format\":"
+       "\"relative\",\"reference_time\":0,\"group_id\":");
   p = write_cid(p, odcid);
   *p++ = '}';
   return p;
@@ -196,7 +173,7 @@ static uint8_t *write_common_fields(uint8_t *p, const ngtcp2_cid *odcid) {
 
 static uint8_t *write_trace(uint8_t *p, int server, const ngtcp2_cid *odcid) {
   p = write_verbatim(
-      p, "\"trace\":{\"vantage_point\":{\"name\":\"ngtcp2\",\"type\":");
+    p, "\"trace\":{\"vantage_point\":{\"name\":\"ngtcp2\",\"type\":");
   if (server) {
     p = write_string(p, "server");
   } else {
@@ -217,7 +194,7 @@ void ngtcp2_qlog_start(ngtcp2_qlog *qlog, const ngtcp2_cid *odcid, int server) {
   }
 
   p = write_verbatim(
-      p, "\x1e{\"qlog_format\":\"JSON-SEQ\",\"qlog_version\":\"0.3\",");
+    p, "\x1E{\"qlog_format\":\"JSON-SEQ\",\"qlog_version\":\"0.3\",");
   p = write_trace(p, server, odcid);
   p = write_verbatim(p, "}\n");
 
@@ -226,49 +203,41 @@ void ngtcp2_qlog_start(ngtcp2_qlog *qlog, const ngtcp2_cid *odcid, int server) {
 }
 
 void ngtcp2_qlog_end(ngtcp2_qlog *qlog) {
-  uint8_t buf[1] = {0};
-
   if (!qlog->write) {
     return;
   }
 
-  qlog->write(qlog->user_data, NGTCP2_QLOG_WRITE_FLAG_FIN, &buf, 0);
+  qlog->write(qlog->user_data, NGTCP2_QLOG_WRITE_FLAG_FIN, "", 0);
 }
 
-static ngtcp2_vec vec_pkt_type_initial = ngtcp2_make_vec_lit("initial");
-static ngtcp2_vec vec_pkt_type_handshake = ngtcp2_make_vec_lit("handshake");
-static ngtcp2_vec vec_pkt_type_0rtt = ngtcp2_make_vec_lit("0RTT");
-static ngtcp2_vec vec_pkt_type_1rtt = ngtcp2_make_vec_lit("1RTT");
-static ngtcp2_vec vec_pkt_type_retry = ngtcp2_make_vec_lit("retry");
-static ngtcp2_vec vec_pkt_type_version_negotiation =
-    ngtcp2_make_vec_lit("version_negotiation");
-static ngtcp2_vec vec_pkt_type_stateless_reset =
-    ngtcp2_make_vec_lit("stateless_reset");
-static ngtcp2_vec vec_pkt_type_unknown = ngtcp2_make_vec_lit("unknown");
+static const ngtcp2_vec vec_pkt_type_initial = ngtcp2_make_vec_lit("initial");
+static const ngtcp2_vec vec_pkt_type_handshake =
+  ngtcp2_make_vec_lit("handshake");
+static const ngtcp2_vec vec_pkt_type_0rtt = ngtcp2_make_vec_lit("0RTT");
+static const ngtcp2_vec vec_pkt_type_1rtt = ngtcp2_make_vec_lit("1RTT");
+static const ngtcp2_vec vec_pkt_type_retry = ngtcp2_make_vec_lit("retry");
+static const ngtcp2_vec vec_pkt_type_version_negotiation =
+  ngtcp2_make_vec_lit("version_negotiation");
+static const ngtcp2_vec vec_pkt_type_stateless_reset =
+  ngtcp2_make_vec_lit("stateless_reset");
+static const ngtcp2_vec vec_pkt_type_unknown = ngtcp2_make_vec_lit("unknown");
 
 static const ngtcp2_vec *qlog_pkt_type(const ngtcp2_pkt_hd *hd) {
-  if (hd->flags & NGTCP2_PKT_FLAG_LONG_FORM) {
-    switch (hd->type) {
-    case NGTCP2_PKT_INITIAL:
-      return &vec_pkt_type_initial;
-    case NGTCP2_PKT_HANDSHAKE:
-      return &vec_pkt_type_handshake;
-    case NGTCP2_PKT_0RTT:
-      return &vec_pkt_type_0rtt;
-    case NGTCP2_PKT_RETRY:
-      return &vec_pkt_type_retry;
-    default:
-      return &vec_pkt_type_unknown;
-    }
-  }
-
   switch (hd->type) {
+  case NGTCP2_PKT_INITIAL:
+    return &vec_pkt_type_initial;
+  case NGTCP2_PKT_0RTT:
+    return &vec_pkt_type_0rtt;
+  case NGTCP2_PKT_HANDSHAKE:
+    return &vec_pkt_type_handshake;
+  case NGTCP2_PKT_RETRY:
+    return &vec_pkt_type_retry;
+  case NGTCP2_PKT_1RTT:
+    return &vec_pkt_type_1rtt;
   case NGTCP2_PKT_VERSION_NEGOTIATION:
     return &vec_pkt_type_version_negotiation;
   case NGTCP2_PKT_STATELESS_RESET:
     return &vec_pkt_type_stateless_reset;
-  case NGTCP2_PKT_1RTT:
-    return &vec_pkt_type_1rtt;
   default:
     return &vec_pkt_type_unknown;
   }
@@ -284,9 +253,9 @@ static uint8_t *write_pkt_hd(uint8_t *p, const ngtcp2_pkt_hd *hd) {
   p = write_pair(p, "packet_type", qlog_pkt_type(hd));
   *p++ = ',';
   p = write_pair_number(p, "packet_number", (uint64_t)hd->pkt_num);
-  if (hd->type == NGTCP2_PKT_INITIAL && hd->token.len) {
+  if (hd->type == NGTCP2_PKT_INITIAL && hd->tokenlen) {
     p = write_verbatim(p, ",\"token\":{");
-    p = write_pair_hex(p, "data", hd->token.base, hd->token.len);
+    p = write_pair_hex(p, "data", hd->token, hd->tokenlen);
     *p++ = '}';
   }
   /* TODO Write DCIL and DCID */
@@ -316,7 +285,7 @@ static uint8_t *write_ping_frame(uint8_t *p, const ngtcp2_ping *fr) {
 static uint8_t *write_ack_frame(uint8_t *p, const ngtcp2_ack *fr) {
   int64_t largest_ack, min_ack;
   size_t i;
-  const ngtcp2_ack_blk *blk;
+  const ngtcp2_ack_range *range;
 
   /*
    * {"frame_type":"ack","ack_delay":0000000000000000000,"acked_ranges":[]}
@@ -336,26 +305,26 @@ static uint8_t *write_ack_frame(uint8_t *p, const ngtcp2_ack *fr) {
   p = write_verbatim(p, ",\"acked_ranges\":[");
 
   largest_ack = fr->largest_ack;
-  min_ack = fr->largest_ack - (int64_t)fr->first_ack_blklen;
+  min_ack = fr->largest_ack - (int64_t)fr->first_ack_range;
 
   *p++ = '[';
-  p = write_number(p, (uint64_t)min_ack);
+  p = ngtcp2_encode_uint(p, (uint64_t)min_ack);
   if (largest_ack != min_ack) {
     *p++ = ',';
-    p = write_number(p, (uint64_t)largest_ack);
+    p = ngtcp2_encode_uint(p, (uint64_t)largest_ack);
   }
   *p++ = ']';
 
-  for (i = 0; i < fr->num_blks; ++i) {
-    blk = &fr->blks[i];
-    largest_ack = min_ack - (int64_t)blk->gap - 2;
-    min_ack = largest_ack - (int64_t)blk->blklen;
+  for (i = 0; i < fr->rangecnt; ++i) {
+    range = &fr->ranges[i];
+    largest_ack = min_ack - (int64_t)range->gap - 2;
+    min_ack = largest_ack - (int64_t)range->len;
     *p++ = ',';
     *p++ = '[';
-    p = write_number(p, (uint64_t)min_ack);
+    p = ngtcp2_encode_uint(p, (uint64_t)min_ack);
     if (largest_ack != min_ack) {
       *p++ = ',';
-      p = write_number(p, (uint64_t)largest_ack);
+      p = ngtcp2_encode_uint(p, (uint64_t)largest_ack);
     }
     *p++ = ']';
   }
@@ -410,7 +379,7 @@ static uint8_t *write_stop_sending_frame(uint8_t *p,
   return p;
 }
 
-static uint8_t *write_crypto_frame(uint8_t *p, const ngtcp2_crypto *fr) {
+static uint8_t *write_crypto_frame(uint8_t *p, const ngtcp2_stream *fr) {
   /*
    * {"frame_type":"crypto","offset":0000000000000000000,"length":0000000000000000000}
    */
@@ -432,9 +401,9 @@ static uint8_t *write_new_token_frame(uint8_t *p, const ngtcp2_new_token *fr) {
 #define NGTCP2_QLOG_NEW_TOKEN_FRAME_OVERHEAD 75
 
   p = write_verbatim(p, "{\"frame_type\":\"new_token\",");
-  p = write_pair_number(p, "length", fr->token.len);
+  p = write_pair_number(p, "length", fr->tokenlen);
   p = write_verbatim(p, ",\"token\":{");
-  p = write_pair_hex(p, "data", fr->token.base, fr->token.len);
+  p = write_pair_hex(p, "data", fr->token, fr->tokenlen);
   *p++ = '}';
   *p++ = '}';
 
@@ -513,45 +482,53 @@ static uint8_t *write_max_streams_frame(uint8_t *p,
 
 static uint8_t *write_data_blocked_frame(uint8_t *p,
                                          const ngtcp2_data_blocked *fr) {
-  (void)fr;
-
   /*
-   * {"frame_type":"data_blocked"}
+   * {"frame_type":"data_blocked","limit":0000000000000000000}
    */
-#define NGTCP2_QLOG_DATA_BLOCKED_FRAME_OVERHEAD 29
+#define NGTCP2_QLOG_DATA_BLOCKED_FRAME_OVERHEAD 57
 
-  /* TODO log limit */
+  p = write_verbatim(p, "{\"frame_type\":\"data_blocked\",");
+  p = write_pair_number(p, "limit", fr->offset);
+  *p++ = '}';
 
-  return write_verbatim(p, "{\"frame_type\":\"data_blocked\"}");
+  return p;
 }
 
 static uint8_t *
 write_stream_data_blocked_frame(uint8_t *p,
                                 const ngtcp2_stream_data_blocked *fr) {
-  (void)fr;
-
   /*
-   * {"frame_type":"stream_data_blocked"}
+   * {"frame_type":"stream_data_blocked","stream_id":0000000000000000000,"limit":0000000000000000000}
    */
-#define NGTCP2_QLOG_STREAM_DATA_BLOCKED_FRAME_OVERHEAD 36
+#define NGTCP2_QLOG_STREAM_DATA_BLOCKED_FRAME_OVERHEAD 96
 
-  /* TODO log limit */
+  p = write_verbatim(p, "{\"frame_type\":\"stream_data_blocked\",");
+  p = write_pair_number(p, "stream_id", (uint64_t)fr->stream_id);
+  *p++ = ',';
+  p = write_pair_number(p, "limit", fr->offset);
+  *p++ = '}';
 
-  return write_verbatim(p, "{\"frame_type\":\"stream_data_blocked\"}");
+  return p;
 }
 
 static uint8_t *write_streams_blocked_frame(uint8_t *p,
                                             const ngtcp2_streams_blocked *fr) {
-  (void)fr;
-
   /*
-   * {"frame_type":"streams_blocked"}
+   * {"frame_type":"streams_blocked","stream_type":"unidirectional","limit":0000000000000000000}
    */
-#define NGTCP2_QLOG_STREAMS_BLOCKED_FRAME_OVERHEAD 32
+#define NGTCP2_QLOG_STREAMS_BLOCKED_FRAME_OVERHEAD 91
 
-  /* TODO Log stream_type and limit */
+  p = write_verbatim(p, "{\"frame_type\":\"streams_blocked\",\"stream_type\":");
+  if (fr->type == NGTCP2_FRAME_STREAMS_BLOCKED_BIDI) {
+    p = write_string(p, "bidirectional");
+  } else {
+    p = write_string(p, "unidirectional");
+  }
+  *p++ = ',';
+  p = write_pair_number(p, "limit", fr->max_streams);
+  *p++ = '}';
 
-  return write_verbatim(p, "{\"frame_type\":\"streams_blocked\"}");
+  return p;
 }
 
 static uint8_t *
@@ -570,8 +547,7 @@ write_new_connection_id_frame(uint8_t *p, const ngtcp2_new_connection_id *fr) {
   *p++ = ',';
   p = write_pair_cid(p, "connection_id", &fr->cid);
   p = write_verbatim(p, ",\"stateless_reset_token\":{");
-  p = write_pair_hex(p, "data", fr->stateless_reset_token,
-                     sizeof(fr->stateless_reset_token));
+  p = write_pair_hex(p, "data", fr->token.data, sizeof(fr->token.data));
   *p++ = '}';
   *p++ = '}';
 
@@ -601,7 +577,7 @@ static uint8_t *write_path_challenge_frame(uint8_t *p,
 #define NGTCP2_QLOG_PATH_CHALLENGE_FRAME_OVERHEAD 57
 
   p = write_verbatim(p, "{\"frame_type\":\"path_challenge\",");
-  p = write_pair_hex(p, "data", fr->data, sizeof(fr->data));
+  p = write_pair_hex(p, "data", fr->data.data, sizeof(fr->data.data));
   *p++ = '}';
 
   return p;
@@ -615,7 +591,7 @@ static uint8_t *write_path_response_frame(uint8_t *p,
 #define NGTCP2_QLOG_PATH_RESPONSE_FRAME_OVERHEAD 56
 
   p = write_verbatim(p, "{\"frame_type\":\"path_response\",");
-  p = write_pair_hex(p, "data", fr->data, sizeof(fr->data));
+  p = write_pair_hex(p, "data", fr->data.data, sizeof(fr->data.data));
   *p++ = '}';
 
   return p;
@@ -628,8 +604,8 @@ write_connection_close_frame(uint8_t *p, const ngtcp2_connection_close *fr) {
    */
 #define NGTCP2_QLOG_CONNECTION_CLOSE_FRAME_OVERHEAD 131
 
-  p = write_verbatim(p,
-                     "{\"frame_type\":\"connection_close\",\"error_space\":");
+  p =
+    write_verbatim(p, "{\"frame_type\":\"connection_close\",\"error_space\":");
   if (fr->type == NGTCP2_FRAME_CONNECTION_CLOSE) {
     p = write_string(p, "transport");
   } else {
@@ -685,7 +661,7 @@ static void qlog_pkt_write_start(ngtcp2_qlog *qlog, int sent) {
   ngtcp2_buf_reset(&qlog->buf);
   p = qlog->buf.last;
 
-  *p++ = '\x1e';
+  *p++ = '\x1E';
   *p++ = '{';
   p = qlog_write_time(qlog, p);
   p = write_verbatim(p, ",\"name\":");
@@ -715,7 +691,7 @@ static void qlog_pkt_write_end(ngtcp2_qlog *qlog, const ngtcp2_pkt_hd *hd,
   (1 + 50 + NGTCP2_QLOG_PKT_HD_OVERHEAD)
 
   if (ngtcp2_buf_left(&qlog->buf) <
-      NGTCP2_QLOG_PKT_WRITE_END_OVERHEAD + hd->token.len * 2) {
+      NGTCP2_QLOG_PKT_WRITE_END_OVERHEAD + hd->tokenlen * 2) {
     return;
   }
 
@@ -729,7 +705,7 @@ static void qlog_pkt_write_end(ngtcp2_qlog *qlog, const ngtcp2_pkt_hd *hd,
   p = write_verbatim(p, "],\"header\":");
   p = write_pkt_hd(p, hd);
   p = write_verbatim(p, ",\"raw\":{\"length\":");
-  p = write_number(p, pktlen);
+  p = ngtcp2_encode_uint(p, pktlen);
   p = write_verbatim(p, "}}}\n");
 
   qlog->buf.last = p;
@@ -745,7 +721,7 @@ void ngtcp2_qlog_write_frame(ngtcp2_qlog *qlog, const ngtcp2_frame *fr) {
     return;
   }
 
-  switch (fr->type) {
+  switch (fr->hd.type) {
   case NGTCP2_FRAME_PADDING:
     if (ngtcp2_buf_left(&qlog->buf) < NGTCP2_QLOG_PADDING_FRAME_OVERHEAD + 1) {
       return;
@@ -762,10 +738,10 @@ void ngtcp2_qlog_write_frame(ngtcp2_qlog *qlog, const ngtcp2_frame *fr) {
   case NGTCP2_FRAME_ACK_ECN:
     if (ngtcp2_buf_left(&qlog->buf) <
         NGTCP2_QLOG_ACK_FRAME_BASE_OVERHEAD +
-            (size_t)(fr->type == NGTCP2_FRAME_ACK_ECN
-                         ? NGTCP2_QLOG_ACK_FRAME_ECN_OVERHEAD
-                         : 0) +
-            NGTCP2_QLOG_ACK_FRAME_RANGE_OVERHEAD * (1 + fr->ack.num_blks) + 1) {
+          (size_t)(fr->ack.type == NGTCP2_FRAME_ACK_ECN
+                     ? NGTCP2_QLOG_ACK_FRAME_ECN_OVERHEAD
+                     : 0) +
+          NGTCP2_QLOG_ACK_FRAME_RANGE_OVERHEAD * (1 + fr->ack.rangecnt) + 1) {
       return;
     }
     p = write_ack_frame(p, &fr->ack);
@@ -788,11 +764,11 @@ void ngtcp2_qlog_write_frame(ngtcp2_qlog *qlog, const ngtcp2_frame *fr) {
     if (ngtcp2_buf_left(&qlog->buf) < NGTCP2_QLOG_CRYPTO_FRAME_OVERHEAD + 1) {
       return;
     }
-    p = write_crypto_frame(p, &fr->crypto);
+    p = write_crypto_frame(p, &fr->stream);
     break;
   case NGTCP2_FRAME_NEW_TOKEN:
-    if (ngtcp2_buf_left(&qlog->buf) < NGTCP2_QLOG_NEW_TOKEN_FRAME_OVERHEAD +
-                                          fr->new_token.token.len * 2 + 1) {
+    if (ngtcp2_buf_left(&qlog->buf) <
+        NGTCP2_QLOG_NEW_TOKEN_FRAME_OVERHEAD + fr->new_token.tokenlen * 2 + 1) {
       return;
     }
     p = write_new_token_frame(p, &fr->new_token);
@@ -897,7 +873,7 @@ void ngtcp2_qlog_write_frame(ngtcp2_qlog *qlog, const ngtcp2_frame *fr) {
     p = write_datagram_frame(p, &fr->datagram);
     break;
   default:
-    assert(0);
+    ngtcp2_unreachable();
   }
 
   *p++ = ',';
@@ -924,21 +900,23 @@ void ngtcp2_qlog_pkt_sent_end(ngtcp2_qlog *qlog, const ngtcp2_pkt_hd *hd,
 }
 
 void ngtcp2_qlog_parameters_set_transport_params(
-    ngtcp2_qlog *qlog, const ngtcp2_transport_params *params, int server,
-    ngtcp2_qlog_side side) {
-  uint8_t buf[1024];
+  ngtcp2_qlog *qlog, const ngtcp2_transport_params *params, int server,
+  ngtcp2_qlog_side side) {
+  uint8_t buf[2048];
   uint8_t *p = buf;
   const ngtcp2_preferred_addr *paddr;
+  const ngtcp2_sockaddr_in *sa_in;
+  const ngtcp2_sockaddr_in6 *sa_in6;
 
   if (!qlog->write) {
     return;
   }
 
-  *p++ = '\x1e';
+  *p++ = '\x1E';
   *p++ = '{';
   p = qlog_write_time(qlog, p);
   p = write_verbatim(
-      p, ",\"name\":\"transport:parameters_set\",\"data\":{\"owner\":");
+    p, ",\"name\":\"transport:parameters_set\",\"data\":{\"owner\":");
 
   if (side == NGTCP2_QLOG_SIDE_LOCAL) {
     p = write_string(p, "local");
@@ -970,8 +948,8 @@ void ngtcp2_qlog_parameters_set_transport_params(
   *p++ = ',';
   p = write_pair_duration(p, "max_idle_timeout", params->max_idle_timeout);
   *p++ = ',';
-  p = write_pair_number(p, "max_udp_payload_size",
-                        params->max_udp_payload_size);
+  p =
+    write_pair_number(p, "max_udp_payload_size", params->max_udp_payload_size);
   *p++ = ',';
   p = write_pair_number(p, "ack_delay_exponent", params->ack_delay_exponent);
   *p++ = ',';
@@ -996,20 +974,33 @@ void ngtcp2_qlog_parameters_set_transport_params(
   *p++ = ',';
   p = write_pair_number(p, "initial_max_streams_uni",
                         params->initial_max_streams_uni);
-  if (params->preferred_address_present) {
+  if (params->preferred_addr_present) {
     *p++ = ',';
-    paddr = &params->preferred_address;
+    paddr = &params->preferred_addr;
     p = write_string(p, "preferred_address");
     *p++ = ':';
     *p++ = '{';
-    p = write_pair_hex(p, "ip_v4", paddr->ipv4_addr, sizeof(paddr->ipv4_addr));
-    *p++ = ',';
-    p = write_pair_number(p, "port_v4", paddr->ipv4_port);
-    *p++ = ',';
-    p = write_pair_hex(p, "ip_v6", paddr->ipv6_addr, sizeof(paddr->ipv6_addr));
-    *p++ = ',';
-    p = write_pair_number(p, "port_v6", paddr->ipv6_port);
-    *p++ = ',';
+
+    if (paddr->ipv4_present) {
+      sa_in = &paddr->ipv4;
+
+      p = write_pair_hex(p, "ip_v4", (const uint8_t *)&sa_in->sin_addr,
+                         sizeof(sa_in->sin_addr));
+      *p++ = ',';
+      p = write_pair_number(p, "port_v4", ngtcp2_ntohs(sa_in->sin_port));
+      *p++ = ',';
+    }
+
+    if (paddr->ipv6_present) {
+      sa_in6 = &paddr->ipv6;
+
+      p = write_pair_hex(p, "ip_v6", (const uint8_t *)&sa_in6->sin6_addr,
+                         sizeof(sa_in6->sin6_addr));
+      *p++ = ',';
+      p = write_pair_number(p, "port_v6", ngtcp2_ntohs(sa_in6->sin6_port));
+      *p++ = ',';
+    }
+
     p = write_pair_cid(p, "connection_id", &paddr->cid);
     p = write_verbatim(p, ",\"stateless_reset_token\":{");
     p = write_pair_hex(p, "data", paddr->stateless_reset_token,
@@ -1037,7 +1028,7 @@ void ngtcp2_qlog_metrics_updated(ngtcp2_qlog *qlog,
     return;
   }
 
-  *p++ = '\x1e';
+  *p++ = '\x1E';
   *p++ = '{';
   p = qlog_write_time(qlog, p);
   p = write_verbatim(p, ",\"name\":\"recovery:metrics_updated\",\"data\":{");
@@ -1071,23 +1062,22 @@ void ngtcp2_qlog_metrics_updated(ngtcp2_qlog *qlog,
 void ngtcp2_qlog_pkt_lost(ngtcp2_qlog *qlog, ngtcp2_rtb_entry *ent) {
   uint8_t buf[256];
   uint8_t *p = buf;
-  ngtcp2_pkt_hd hd = {0};
 
   if (!qlog->write) {
     return;
   }
 
-  *p++ = '\x1e';
+  *p++ = '\x1E';
   *p++ = '{';
   p = qlog_write_time(qlog, p);
   p = write_verbatim(
-      p, ",\"name\":\"recovery:packet_lost\",\"data\":{\"header\":");
+    p, ",\"name\":\"recovery:packet_lost\",\"data\":{\"header\":");
 
-  hd.type = ent->hd.type;
-  hd.flags = ent->hd.flags;
-  hd.pkt_num = ent->hd.pkt_num;
-
-  p = write_pkt_hd(p, &hd);
+  p = write_pkt_hd(p, &(ngtcp2_pkt_hd){
+                        .pkt_num = ent->hd.pkt_num,
+                        .type = ent->hd.type,
+                        .flags = ent->hd.flags,
+                      });
   p = write_verbatim(p, "}}\n");
 
   qlog->write(qlog->user_data, NGTCP2_QLOG_WRITE_FLAG_NONE, buf,
@@ -1105,24 +1095,21 @@ void ngtcp2_qlog_retry_pkt_received(ngtcp2_qlog *qlog, const ngtcp2_pkt_hd *hd,
 
   ngtcp2_buf_init(&buf, rawbuf, sizeof(rawbuf));
 
-  *buf.last++ = '\x1e';
+  *buf.last++ = '\x1E';
   *buf.last++ = '{';
   buf.last = qlog_write_time(qlog, buf.last);
   buf.last = write_verbatim(
-      buf.last,
-      ",\"name\":\"transport:packet_received\",\"data\":{\"header\":");
+    buf.last, ",\"name\":\"transport:packet_received\",\"data\":{\"header\":");
 
-  if (ngtcp2_buf_left(&buf) <
-      NGTCP2_QLOG_PKT_HD_OVERHEAD + hd->token.len * 2 +
-          sizeof(",\"retry_token\":{\"data\":\"\"}}}\n") - 1 +
-          retry->token.len * 2) {
+  if (ngtcp2_buf_left(&buf) < NGTCP2_QLOG_PKT_HD_OVERHEAD + hd->tokenlen * 2 +
+                                sizeof(",\"retry_token\":{\"data\":\"\"}}}\n") -
+                                1 + retry->tokenlen * 2) {
     return;
   }
 
   buf.last = write_pkt_hd(buf.last, hd);
   buf.last = write_verbatim(buf.last, ",\"retry_token\":{");
-  buf.last =
-      write_pair_hex(buf.last, "data", retry->token.base, retry->token.len);
+  buf.last = write_pair_hex(buf.last, "data", retry->token, retry->tokenlen);
   buf.last = write_verbatim(buf.last, "}}}\n");
 
   qlog->write(qlog->user_data, NGTCP2_QLOG_WRITE_FLAG_NONE, buf.pos,
@@ -1130,26 +1117,26 @@ void ngtcp2_qlog_retry_pkt_received(ngtcp2_qlog *qlog, const ngtcp2_pkt_hd *hd,
 }
 
 void ngtcp2_qlog_stateless_reset_pkt_received(
-    ngtcp2_qlog *qlog, const ngtcp2_pkt_stateless_reset *sr) {
+  ngtcp2_qlog *qlog, const ngtcp2_pkt_stateless_reset2 *sr) {
   uint8_t buf[256];
   uint8_t *p = buf;
-  ngtcp2_pkt_hd hd = {0};
+  static const ngtcp2_pkt_hd hd = {
+    .type = NGTCP2_PKT_STATELESS_RESET,
+  };
 
   if (!qlog->write) {
     return;
   }
 
-  hd.type = NGTCP2_PKT_STATELESS_RESET;
-
-  *p++ = '\x1e';
+  *p++ = '\x1E';
   *p++ = '{';
   p = qlog_write_time(qlog, p);
   p = write_verbatim(
-      p, ",\"name\":\"transport:packet_received\",\"data\":{\"header\":");
+    p, ",\"name\":\"transport:packet_received\",\"data\":{\"header\":");
   p = write_pkt_hd(p, &hd);
   *p++ = ',';
-  p = write_pair_hex(p, "stateless_reset_token", sr->stateless_reset_token,
-                     NGTCP2_STATELESS_RESET_TOKENLEN);
+  p = write_pair_hex(p, "stateless_reset_token", sr->token.data,
+                     sizeof(sr->token.data));
   p = write_verbatim(p, "}}\n");
 
   qlog->write(qlog->user_data, NGTCP2_QLOG_WRITE_FLAG_NONE, buf,
@@ -1171,18 +1158,17 @@ void ngtcp2_qlog_version_negotiation_pkt_received(ngtcp2_qlog *qlog,
 
   ngtcp2_buf_init(&buf, rawbuf, sizeof(rawbuf));
 
-  *buf.last++ = '\x1e';
+  *buf.last++ = '\x1E';
   *buf.last++ = '{';
   buf.last = qlog_write_time(qlog, buf.last);
   buf.last = write_verbatim(
-      buf.last,
-      ",\"name\":\"transport:packet_received\",\"data\":{\"header\":");
+    buf.last, ",\"name\":\"transport:packet_received\",\"data\":{\"header\":");
   buf.last = write_pkt_hd(buf.last, hd);
   buf.last = write_verbatim(buf.last, ",\"supported_versions\":[");
 
   if (nsv) {
-    if (ngtcp2_buf_left(&buf) <
-        (sizeof("\"xxxxxxxx\",") - 1) * nsv - 1 + sizeof("]}}\n") - 1) {
+    if (ngtcp2_buf_left(&buf) < ngtcp2_strlen_lit("\"xxxxxxxx\",") * nsv - 1 +
+                                  ngtcp2_strlen_lit("]}}\n")) {
       return;
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 1999-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1999-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -15,6 +15,7 @@
 #include <openssl/kdf.h>
 #include <openssl/core_names.h>
 #include <openssl/proverr.h>
+#include "internal/common.h"
 #include "internal/cryptlib.h"
 #include "internal/numbers.h"
 #include "crypto/evp.h"
@@ -22,8 +23,10 @@
 #include "prov/providercommon.h"
 #include "prov/implementations.h"
 #include "prov/provider_util.h"
+#include "providers/implementations/kdfs/pkcs12kdf.inc"
 
 static OSSL_FUNC_kdf_newctx_fn kdf_pkcs12_new;
+static OSSL_FUNC_kdf_dupctx_fn kdf_pkcs12_dup;
 static OSSL_FUNC_kdf_freectx_fn kdf_pkcs12_free;
 static OSSL_FUNC_kdf_reset_fn kdf_pkcs12_reset;
 static OSSL_FUNC_kdf_derive_fn kdf_pkcs12_derive;
@@ -46,9 +49,9 @@ typedef struct {
 /* PKCS12 compatible key/IV generation */
 
 static int pkcs12kdf_derive(const unsigned char *pass, size_t passlen,
-                            const unsigned char *salt, size_t saltlen,
-                            int id, uint64_t iter, const EVP_MD *md_type,
-                            unsigned char *out, size_t n)
+    const unsigned char *salt, size_t saltlen,
+    int id, uint64_t iter, const EVP_MD *md_type,
+    unsigned char *out, size_t n)
 {
     unsigned char *B = NULL, *D = NULL, *I = NULL, *p = NULL, *Ai = NULL;
     size_t Slen, Plen, Ilen;
@@ -59,7 +62,7 @@ static int pkcs12kdf_derive(const unsigned char *pass, size_t passlen,
 
     ctx = EVP_MD_CTX_new();
     if (ctx == NULL) {
-        ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+        ERR_raise(ERR_LIB_PROV, ERR_R_EVP_LIB);
         goto end;
     }
     vi = EVP_MD_get_block_size(md_type);
@@ -80,10 +83,8 @@ static int pkcs12kdf_derive(const unsigned char *pass, size_t passlen,
         Plen = 0;
     Ilen = Slen + Plen;
     I = OPENSSL_malloc(Ilen);
-    if (D == NULL || Ai == NULL || B == NULL || I == NULL) {
-        ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+    if (D == NULL || Ai == NULL || B == NULL || I == NULL)
         goto end;
-    }
     for (i = 0; i < v; i++)
         D[i] = id;
     p = I;
@@ -126,7 +127,7 @@ static int pkcs12kdf_derive(const unsigned char *pass, size_t passlen,
         }
     }
 
- end:
+end:
     OPENSSL_free(Ai);
     OPENSSL_free(B);
     OPENSSL_free(D);
@@ -143,10 +144,8 @@ static void *kdf_pkcs12_new(void *provctx)
         return NULL;
 
     ctx = OPENSSL_zalloc(sizeof(*ctx));
-    if (ctx == NULL) {
-        ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+    if (ctx == NULL)
         return NULL;
-    }
     ctx->provctx = provctx;
     return ctx;
 }
@@ -178,18 +177,39 @@ static void kdf_pkcs12_reset(void *vctx)
     ctx->provctx = provctx;
 }
 
+static void *kdf_pkcs12_dup(void *vctx)
+{
+    const KDF_PKCS12 *src = (const KDF_PKCS12 *)vctx;
+    KDF_PKCS12 *dest;
+
+    dest = kdf_pkcs12_new(src->provctx);
+    if (dest != NULL) {
+        if (!ossl_prov_memdup(src->salt, src->salt_len,
+                &dest->salt, &dest->salt_len)
+            || !ossl_prov_memdup(src->pass, src->pass_len,
+                &dest->pass, &dest->pass_len)
+            || !ossl_prov_digest_copy(&dest->digest, &src->digest))
+            goto err;
+        dest->iter = src->iter;
+        dest->id = src->id;
+    }
+    return dest;
+
+err:
+    kdf_pkcs12_free(dest);
+    return NULL;
+}
+
 static int pkcs12kdf_set_membuf(unsigned char **buffer, size_t *buflen,
-                             const OSSL_PARAM *p)
+    const OSSL_PARAM *p)
 {
     OPENSSL_clear_free(*buffer, *buflen);
     *buffer = NULL;
     *buflen = 0;
 
     if (p->data_size == 0) {
-        if ((*buffer = OPENSSL_malloc(1)) == NULL) {
-            ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+        if ((*buffer = OPENSSL_malloc(1)) == NULL)
             return 0;
-        }
     } else if (p->data != NULL) {
         if (!OSSL_PARAM_get_octet_string(p, (void **)buffer, 0, buflen))
             return 0;
@@ -198,7 +218,7 @@ static int pkcs12kdf_set_membuf(unsigned char **buffer, size_t *buflen,
 }
 
 static int kdf_pkcs12_derive(void *vctx, unsigned char *key, size_t keylen,
-                             const OSSL_PARAM params[])
+    const OSSL_PARAM params[])
 {
     KDF_PKCS12 *ctx = (KDF_PKCS12 *)vctx;
     const EVP_MD *md;
@@ -218,83 +238,83 @@ static int kdf_pkcs12_derive(void *vctx, unsigned char *key, size_t keylen,
 
     md = ossl_prov_digest_md(&ctx->digest);
     return pkcs12kdf_derive(ctx->pass, ctx->pass_len, ctx->salt, ctx->salt_len,
-                            ctx->id, ctx->iter, md, key, keylen);
+        ctx->id, ctx->iter, md, key, keylen);
 }
 
 static int kdf_pkcs12_set_ctx_params(void *vctx, const OSSL_PARAM params[])
 {
-    const OSSL_PARAM *p;
+    struct pkcs12_set_ctx_params_st p;
     KDF_PKCS12 *ctx = vctx;
-    OSSL_LIB_CTX *provctx = PROV_LIBCTX_OF(ctx->provctx);
+    OSSL_LIB_CTX *provctx;
 
-    if (params == NULL)
-        return 1;
-
-    if (!ossl_prov_digest_load_from_params(&ctx->digest, params, provctx))
+    if (ctx == NULL || !pkcs12_set_ctx_params_decoder(params, &p))
         return 0;
 
-    if ((p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_PASSWORD)) != NULL)
-        if (!pkcs12kdf_set_membuf(&ctx->pass, &ctx->pass_len, p))
-            return 0;
+    provctx = PROV_LIBCTX_OF(ctx->provctx);
 
-    if ((p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_SALT)) != NULL)
-        if (!pkcs12kdf_set_membuf(&ctx->salt, &ctx->salt_len,p))
-            return 0;
+    if (!ossl_prov_digest_load(&ctx->digest, p.digest, p.propq, provctx))
+        return 0;
 
-    if ((p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_PKCS12_ID)) != NULL)
-        if (!OSSL_PARAM_get_int(p, &ctx->id))
-            return 0;
+    if (p.pw != NULL && !pkcs12kdf_set_membuf(&ctx->pass, &ctx->pass_len, p.pw))
+        return 0;
 
-    if ((p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_ITER)) != NULL)
-        if (!OSSL_PARAM_get_uint64(p, &ctx->iter))
-            return 0;
+    if (p.salt != NULL
+        && !pkcs12kdf_set_membuf(&ctx->salt, &ctx->salt_len, p.salt))
+        return 0;
+
+    if (p.p12id != NULL && !OSSL_PARAM_get_int(p.p12id, &ctx->id))
+        return 0;
+
+    if (p.iter != NULL && !OSSL_PARAM_get_uint64(p.iter, &ctx->iter))
+        return 0;
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    /*
+     * If we're running the fuzzer, limit iteration count to
+     * 100 so we don't time out running the derivation for
+     * a really long time
+     */
+    if (getenv("OPENSSL_RUNNING_UNIT_TESTS") == NULL && p.iter != NULL && ctx->iter > 100)
+        ctx->iter = 100;
+#endif
     return 1;
 }
 
 static const OSSL_PARAM *kdf_pkcs12_settable_ctx_params(
-        ossl_unused void *ctx, ossl_unused void *provctx)
+    ossl_unused void *ctx, ossl_unused void *provctx)
 {
-    static const OSSL_PARAM known_settable_ctx_params[] = {
-        OSSL_PARAM_utf8_string(OSSL_KDF_PARAM_PROPERTIES, NULL, 0),
-        OSSL_PARAM_utf8_string(OSSL_KDF_PARAM_DIGEST, NULL, 0),
-        OSSL_PARAM_octet_string(OSSL_KDF_PARAM_PASSWORD, NULL, 0),
-        OSSL_PARAM_octet_string(OSSL_KDF_PARAM_SALT, NULL, 0),
-        OSSL_PARAM_uint64(OSSL_KDF_PARAM_ITER, NULL),
-        OSSL_PARAM_int(OSSL_KDF_PARAM_PKCS12_ID, NULL),
-        OSSL_PARAM_END
-    };
-    return known_settable_ctx_params;
+    return pkcs12_set_ctx_params_list;
 }
 
 static int kdf_pkcs12_get_ctx_params(void *vctx, OSSL_PARAM params[])
 {
-    OSSL_PARAM *p;
+    struct pkcs12_get_ctx_params_st p;
+    KDF_PKCS12 *ctx = vctx;
 
-    if ((p = OSSL_PARAM_locate(params, OSSL_KDF_PARAM_SIZE)) != NULL)
-        return OSSL_PARAM_set_size_t(p, SIZE_MAX);
-    return -2;
+    if (ctx == NULL || !pkcs12_get_ctx_params_decoder(params, &p))
+        return 0;
+
+    if (p.size != NULL && !OSSL_PARAM_set_size_t(p.size, SIZE_MAX))
+        return 0;
+    return 1;
 }
 
 static const OSSL_PARAM *kdf_pkcs12_gettable_ctx_params(
-        ossl_unused void *ctx, ossl_unused void *provctx)
+    ossl_unused void *ctx, ossl_unused void *provctx)
 {
-    static const OSSL_PARAM known_gettable_ctx_params[] = {
-        OSSL_PARAM_size_t(OSSL_KDF_PARAM_SIZE, NULL),
-        OSSL_PARAM_END
-    };
-    return known_gettable_ctx_params;
+    return pkcs12_get_ctx_params_list;
 }
 
 const OSSL_DISPATCH ossl_kdf_pkcs12_functions[] = {
-    { OSSL_FUNC_KDF_NEWCTX, (void(*)(void))kdf_pkcs12_new },
-    { OSSL_FUNC_KDF_FREECTX, (void(*)(void))kdf_pkcs12_free },
-    { OSSL_FUNC_KDF_RESET, (void(*)(void))kdf_pkcs12_reset },
-    { OSSL_FUNC_KDF_DERIVE, (void(*)(void))kdf_pkcs12_derive },
+    { OSSL_FUNC_KDF_NEWCTX, (void (*)(void))kdf_pkcs12_new },
+    { OSSL_FUNC_KDF_DUPCTX, (void (*)(void))kdf_pkcs12_dup },
+    { OSSL_FUNC_KDF_FREECTX, (void (*)(void))kdf_pkcs12_free },
+    { OSSL_FUNC_KDF_RESET, (void (*)(void))kdf_pkcs12_reset },
+    { OSSL_FUNC_KDF_DERIVE, (void (*)(void))kdf_pkcs12_derive },
     { OSSL_FUNC_KDF_SETTABLE_CTX_PARAMS,
-      (void(*)(void))kdf_pkcs12_settable_ctx_params },
-    { OSSL_FUNC_KDF_SET_CTX_PARAMS, (void(*)(void))kdf_pkcs12_set_ctx_params },
+        (void (*)(void))kdf_pkcs12_settable_ctx_params },
+    { OSSL_FUNC_KDF_SET_CTX_PARAMS, (void (*)(void))kdf_pkcs12_set_ctx_params },
     { OSSL_FUNC_KDF_GETTABLE_CTX_PARAMS,
-      (void(*)(void))kdf_pkcs12_gettable_ctx_params },
-    { OSSL_FUNC_KDF_GET_CTX_PARAMS, (void(*)(void))kdf_pkcs12_get_ctx_params },
-    { 0, NULL }
+        (void (*)(void))kdf_pkcs12_gettable_ctx_params },
+    { OSSL_FUNC_KDF_GET_CTX_PARAMS, (void (*)(void))kdf_pkcs12_get_ctx_params },
+    OSSL_DISPATCH_END
 };

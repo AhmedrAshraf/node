@@ -1,6 +1,6 @@
 /**
- * @fileoverview Check that common.hasCrypto is used if crypto, tls,
- * https, or http2 modules are required.
+ * @file Check that common.hasCrypto is used if crypto, tls,
+ *   https, or http2 modules are required.
  * @author Daniel Bevenius <daniel.bevenius@gmail.com>
  */
 'use strict';
@@ -48,7 +48,7 @@ module.exports = {
     }
 
     function isCryptoCheck(node) {
-      return utils.usesCommonProperty(node, ['hasCrypto', 'hasFipsCrypto']);
+      return utils.usesCommonProperty(node, ['hasCrypto']);
     }
 
     function checkCryptoCall(node) {
@@ -78,7 +78,7 @@ module.exports = {
             if (beforeAllChecks) {
               context.report({
                 node: requireNode,
-                message: msg
+                message: msg,
               });
             }
           });
@@ -106,10 +106,10 @@ module.exports = {
                 commonModuleNode,
                 '\nif (!common.hasCrypto) {' +
                 ' common.skip("missing crypto");' +
-                '}'
+                '}',
               );
             }
-          }
+          },
         });
       });
     }
@@ -118,7 +118,7 @@ module.exports = {
       'CallExpression': (node) => testCryptoUsage(node),
       'IfStatement:exit': (node) => testIfStatement(node),
       'MemberExpression:exit': (node) => testMemberExpression(node),
-      'Program:exit': () => reportIfMissingCheck()
+      'Program:exit': () => reportIfMissingCheck(),
     };
-  }
+  },
 };

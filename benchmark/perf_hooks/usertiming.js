@@ -8,7 +8,7 @@ const {
 } = require('perf_hooks');
 
 const bench = common.createBenchmark(main, {
-  n: [1e5],
+  n: [1e6],
   observe: ['all', 'measure'],
 });
 
@@ -29,6 +29,6 @@ function main({ n, observe }) {
 
   bench.start();
   performance.mark('start');
-  for (let i = 0; i < 1e5; i++)
+  for (let i = 0; i < n; i++)
     test();
 }

@@ -7,11 +7,11 @@ const { Readable, pipeline } = require('stream');
 const http2 = require('http2');
 
 {
-  const server = http2.createServer((req, res) => {
+  const server = http2.createServer(common.mustCallAtLeast((req, res) => {
     pipeline(req, res, common.mustCall());
-  });
+  }));
 
-  server.listen(0, () => {
+  server.listen(0, common.mustCall(() => {
     const url = `http://localhost:${server.address().port}`;
     const client = http2.connect(url);
     const req = client.request({ ':method': 'POST' });
@@ -27,10 +27,11 @@ const http2 = require('http2');
       client.close();
     }));
 
-    let cnt = 10;
+    let received = 0;
     req.on('data', (data) => {
-      cnt--;
-      if (cnt === 0) rs.destroy();
+      received += data.length;
+      // Use a byte threshold because data event chunking varies by platform.
+      if (received >= 32 * 1024) rs.destroy();
     });
-  });
+  }));
 }

@@ -1,8 +1,10 @@
 'use strict';
 
+// Fixes: https://github.com/nodejs/node/issues/42713
 const common = require('../common');
-if (!common.hasCrypto)
+if (!common.hasCrypto) {
   common.skip('missing crypto');
+}
 const assert = require('assert');
 const http2 = require('http2');
 
@@ -31,7 +33,7 @@ server.listen(0, common.mustCall(() => {
   client.socket.on('close', common.mustCall());
   const req = client.request({
     [HTTP2_HEADER_PATH]: '/',
-    [HTTP2_HEADER_METHOD]: 'POST'
+    [HTTP2_HEADER_METHOD]: 'POST',
   });
   req.end();
   req.on('response', common.mustCall());

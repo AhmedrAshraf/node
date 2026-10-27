@@ -2,12 +2,15 @@ name: Label Flaky Test Issues
 
 on:
   issues:
-    types: [opened, labeled]
+    types: [labeled]
+
+permissions:
+  contents: read
 
 jobs:
   label:
     if: github.event.label.name == 'flaky-test'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     permissions:
       issues: write
     steps:
@@ -23,7 +26,6 @@ jobs:
           platform2label["AIX"]="aix";
           platform2label["FreeBSD"]="freebsd";
           platform2label["Linux ARM64"]="linux";
-          platform2label["Linux ARMv7"]="arm";
           platform2label["Linux PPC64LE"]="ppc";
           platform2label["Linux s390x"]="s390";
           platform2label["Linux x64"]="linux";
@@ -47,4 +49,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NUMBER: ${{ github.event.issue.number }}
-        run: gh issue edit "$NUMBER" --repo ${{ github.repository }} --add-label "${{ steps.extract-labels.outputs.LABELS }}"
+          LABELS: ${{ steps.extract-labels.outputs.LABELS }}
+        run: gh issue edit "$NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "$LABELS"

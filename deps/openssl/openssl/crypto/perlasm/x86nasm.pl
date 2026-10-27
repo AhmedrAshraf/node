@@ -1,5 +1,5 @@
 #! /usr/bin/env perl
-# Copyright 1999-2018 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 1999-2026 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -124,9 +124,10 @@ sub ::function_end_B
 
 sub ::file_end
 {   if (grep {/\b${nmdecor}OPENSSL_ia32cap_P\b/i} @out)
+    # OPENSSL_ia32cap_P size should match with internal/cryptlib.h OPENSSL_IA32CAP_P_MAX_INDEXES
     {	my $comm=<<___;
 ${drdecor}segment	.bss
-${drdecor}common	${nmdecor}OPENSSL_ia32cap_P 16
+${drdecor}common	${nmdecor}OPENSSL_ia32cap_P 40
 ___
 	# comment out OPENSSL_ia32cap_P declarations
 	grep {s/(^extern\s+${nmdecor}OPENSSL_ia32cap_P)/\;$1/} @out;

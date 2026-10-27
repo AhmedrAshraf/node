@@ -1,4 +1,4 @@
-#include "arm_arch.h"
+#include "arch/arm_arch.h"
 
 #if __ARM_MAX_ARCH__>=7
 .arch	armv7-a	@ don't confuse not-so-latest binutils with argv8 :-)
@@ -18,7 +18,6 @@
 .long	0x01,0x01,0x01,0x01
 .long	0x0c0f0e0d,0x0c0f0e0d,0x0c0f0e0d,0x0c0f0e0d	@ rotate-n-splat
 .long	0x1b,0x1b,0x1b,0x1b
-
 .globl	aes_v8_set_encrypt_key
 .type	aes_v8_set_encrypt_key,%function
 .align	5

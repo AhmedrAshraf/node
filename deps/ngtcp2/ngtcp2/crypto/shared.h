@@ -22,44 +22,14 @@
  * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#ifndef NGTCP2_SHARED_H
-#define NGTCP2_SHARED_H
+#ifndef SHARED_H
+#define SHARED_H
 
 #ifdef HAVE_CONFIG_H
 #  include <config.h>
-#endif /* HAVE_CONFIG_H */
+#endif /* defined(HAVE_CONFIG_H) */
 
 #include <ngtcp2/ngtcp2_crypto.h>
-
-/**
- * @macro
- *
- * :macro:`NGTCP2_INITIAL_SALT_DRAFT` is a salt value which is used to
- * derive initial secret.  It is used for QUIC draft versions.
- */
-#define NGTCP2_INITIAL_SALT_DRAFT                                              \
-  "\xaf\xbf\xec\x28\x99\x93\xd2\x4c\x9e\x97\x86\xf1\x9c\x61\x11\xe0\x43\x90"   \
-  "\xa8\x99"
-
-/**
- * @macro
- *
- * :macro:`NGTCP2_INITIAL_SALT_V1` is a salt value which is used to
- * derive initial secret.  It is used for QUIC v1.
- */
-#define NGTCP2_INITIAL_SALT_V1                                                 \
-  "\x38\x76\x2c\xf7\xf5\x59\x34\xb3\x4d\x17\x9a\xe6\xa4\xc8\x0c\xad\xcc\xbb"   \
-  "\x7f\x0a"
-
-/**
- * @macro
- *
- * :macro:`NGTCP2_INITIAL_SALT_V2_DRAFT` is a salt value which is used to
- * derive initial secret.  It is used for QUIC v2 draft.
- */
-#define NGTCP2_INITIAL_SALT_V2_DRAFT                                           \
-  "\xa7\x07\xc2\x03\xa5\x9b\x47\x18\x4a\x1d\x62\xca\x57\x04\x06\xea\x7a\xe3"   \
-  "\xe5\xd3"
 
 /* Maximum key usage (encryption) limits */
 #define NGTCP2_CRYPTO_MAX_ENCRYPTION_AES_GCM (1ULL << 23)
@@ -71,6 +41,30 @@
 #define NGTCP2_CRYPTO_MAX_DECRYPTION_FAILURE_AES_GCM (1ULL << 52)
 #define NGTCP2_CRYPTO_MAX_DECRYPTION_FAILURE_CHACHA20_POLY1305 (1ULL << 36)
 #define NGTCP2_CRYPTO_MAX_DECRYPTION_FAILURE_AES_CCM (2965820ULL)
+
+/**
+ * @macro
+ *
+ * :macro:`NGTCP2_CRYPTO_INITIAL_SECRETLEN` is the length of secret
+ * for Initial packets.
+ */
+#define NGTCP2_CRYPTO_INITIAL_SECRETLEN 32
+
+/**
+ * @macro
+ *
+ * :macro:`NGTCP2_CRYPTO_INITIAL_KEYLEN` is the length of key for
+ * Initial packets.
+ */
+#define NGTCP2_CRYPTO_INITIAL_KEYLEN 16
+
+/**
+ * @macro
+ *
+ * :macro:`NGTCP2_CRYPTO_INITIAL_IVLEN` is the length of IV for
+ * Initial packets.
+ */
+#define NGTCP2_CRYPTO_INITIAL_IVLEN 12
 
 /**
  * @function
@@ -86,7 +80,7 @@ ngtcp2_crypto_ctx *ngtcp2_crypto_ctx_initial(ngtcp2_crypto_ctx *ctx);
  * `ngtcp2_crypto_aead_init` initializes |aead| with the provided
  * |aead_native_handle| which is an underlying AEAD object.
  *
- * If libngtcp2_crypto_openssl is linked, |aead_native_handle| must be
+ * If libngtcp2_crypto_quictls is linked, |aead_native_handle| must be
  * a pointer to EVP_CIPHER.
  *
  * If libngtcp2_crypto_gnutls is linked, |aead_native_handle| must be
@@ -107,6 +101,25 @@ ngtcp2_crypto_aead *ngtcp2_crypto_aead_init(ngtcp2_crypto_aead *aead,
 ngtcp2_crypto_aead *ngtcp2_crypto_aead_retry(ngtcp2_crypto_aead *aead);
 
 /**
+ * @enum
+ *
+ * :type:`ngtcp2_crypto_side` indicates which side the application
+ * implements; client or server.
+ */
+typedef enum ngtcp2_crypto_side {
+  /**
+   * :enum:`NGTCP2_CRYPTO_SIDE_CLIENT` indicates that the application
+   * is client.
+   */
+  NGTCP2_CRYPTO_SIDE_CLIENT,
+  /**
+   * :enum:`NGTCP2_CRYPTO_SIDE_SERVER` indicates that the application
+   * is server.
+   */
+  NGTCP2_CRYPTO_SIDE_SERVER
+} ngtcp2_crypto_side;
+
+/**
  * @function
  *
  * `ngtcp2_crypto_derive_initial_secrets` derives initial secrets.
@@ -122,9 +135,9 @@ ngtcp2_crypto_aead *ngtcp2_crypto_aead_retry(ngtcp2_crypto_aead *aead);
  *
  * This function returns 0 if it succeeds, or -1.
  */
-int ngtcp2_crypto_derive_initial_secrets(uint32_t version, uint8_t *rx_secret,
-                                         uint8_t *tx_secret,
+int ngtcp2_crypto_derive_initial_secrets(uint8_t *rx_secret, uint8_t *tx_secret,
                                          uint8_t *initial_secret,
+                                         uint32_t version,
                                          const ngtcp2_cid *client_dcid,
                                          ngtcp2_crypto_side side);
 
@@ -168,7 +181,7 @@ int ngtcp2_crypto_derive_packet_protection_key(uint8_t *key, uint8_t *iv,
  *
  * This function returns 0 if it succeeds, or -1.
  */
-int ngtcp2_crypto_update_traffic_secret(uint8_t *dest,
+int ngtcp2_crypto_update_traffic_secret(uint8_t *dest, uint32_t version,
                                         const ngtcp2_crypto_md *md,
                                         const uint8_t *secret,
                                         size_t secretlen);
@@ -181,7 +194,7 @@ int ngtcp2_crypto_update_traffic_secret(uint8_t *dest,
  * pointed by |buf| of length |len|, to the native handle |tls|.
  *
  * |tls| points to a implementation dependent TLS session object.  If
- * libngtcp2_crypto_openssl is linked, |tls| must be a pointer to SSL
+ * libngtcp2_crypto_quictls is linked, |tls| must be a pointer to SSL
  * object.
  *
  * This function returns 0 if it succeeds, or -1.
@@ -197,7 +210,7 @@ int ngtcp2_crypto_set_local_transport_params(void *tls, const uint8_t *buf,
  * `ngtcp2_conn_set_remote_transport_params`.
  *
  * |tls| points to a implementation dependent TLS session object.  If
- * libngtcp2_crypto_openssl is linked, |tls| must be a pointer to SSL
+ * libngtcp2_crypto_quictls is linked, |tls| must be a pointer to SSL
  * object.
  *
  * This function returns 0 if it succeeds, or -1.
@@ -248,15 +261,15 @@ int ngtcp2_crypto_set_remote_transport_params(ngtcp2_conn *conn, void *tls);
  * This function calls `ngtcp2_conn_set_initial_crypto_ctx` to set
  * initial AEAD and message digest algorithm.  After the successful
  * call of this function, application can use
- * `ngtcp2_conn_get_initial_crypto_ctx` to get the object.
+ * `ngtcp2_conn_get_initial_crypto_ctx2` to get the object.
  *
  * This function returns 0 if it succeeds, or -1.
  */
 int ngtcp2_crypto_derive_and_install_initial_key(
-    ngtcp2_conn *conn, uint8_t *rx_secret, uint8_t *tx_secret,
-    uint8_t *initial_secret, uint8_t *rx_key, uint8_t *rx_iv, uint8_t *rx_hp,
-    uint8_t *tx_key, uint8_t *tx_iv, uint8_t *tx_hp, uint32_t version,
-    const ngtcp2_cid *client_dcid);
+  ngtcp2_conn *conn, uint8_t *rx_secret, uint8_t *tx_secret,
+  uint8_t *initial_secret, uint8_t *rx_key, uint8_t *rx_iv, uint8_t *rx_hp,
+  uint8_t *tx_key, uint8_t *tx_iv, uint8_t *tx_hp, uint32_t version,
+  const ngtcp2_cid *client_dcid);
 
 /**
  * @function
@@ -304,10 +317,10 @@ int ngtcp2_crypto_derive_and_install_initial_key(
  * This function returns 0 if it succeeds, or -1.
  */
 int ngtcp2_crypto_derive_and_install_vneg_initial_key(
-    ngtcp2_conn *conn, uint8_t *rx_secret, uint8_t *tx_secret,
-    uint8_t *initial_secret, uint8_t *rx_key, uint8_t *rx_iv, uint8_t *rx_hp,
-    uint8_t *tx_key, uint8_t *tx_iv, uint8_t *tx_hp, uint32_t version,
-    const ngtcp2_cid *client_dcid);
+  ngtcp2_conn *conn, uint8_t *rx_secret, uint8_t *tx_secret,
+  uint8_t *initial_secret, uint8_t *rx_key, uint8_t *rx_iv, uint8_t *rx_hp,
+  uint8_t *tx_key, uint8_t *tx_iv, uint8_t *tx_hp, uint32_t version,
+  const ngtcp2_cid *client_dcid);
 
 /**
  * @function
@@ -347,4 +360,18 @@ ngtcp2_crypto_aead *ngtcp2_crypto_aead_aes_128_gcm(ngtcp2_crypto_aead *aead);
  */
 int ngtcp2_crypto_random(uint8_t *data, size_t datalen);
 
-#endif /* NGTCP2_SHARED_H */
+/**
+ * @function
+ *
+ * `ngtcp2_crypto_hkdf_expand_label` performs HKDF expand label.  The
+ * result is |destlen| bytes long, and is stored to the buffer pointed
+ * by |dest|.
+ *
+ * This function returns 0 if it succeeds, or -1.
+ */
+int ngtcp2_crypto_hkdf_expand_label(uint8_t *dest, size_t destlen,
+                                    const ngtcp2_crypto_md *md,
+                                    const uint8_t *secret, size_t secretlen,
+                                    const uint8_t *label, size_t labellen);
+
+#endif /* !defined(SHARED_H) */

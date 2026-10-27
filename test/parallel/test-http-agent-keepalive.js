@@ -23,7 +23,7 @@
 const common = require('../common');
 const assert = require('assert');
 const http = require('http');
-const Agent = require('_http_agent').Agent;
+const Agent = require('http').Agent;
 
 let name;
 
@@ -94,13 +94,13 @@ function remoteClose() {
         assert.strictEqual(agent.sockets[name], undefined);
         assert.strictEqual(agent.freeSockets[name].length, 1);
         assert.strictEqual(agent.totalSocketCount, 1);
-        // Waiting remote server close the socket
-        setTimeout(common.mustCall(() => {
+        // Wait for the remote server to close the socket.
+        req.socket.once('close', common.mustCall(() => {
           assert.strictEqual(agent.sockets[name], undefined);
           assert.strictEqual(agent.freeSockets[name], undefined);
           assert.strictEqual(agent.totalSocketCount, 0);
           remoteError();
-        }), common.platformTimeout(200));
+        }));
       }));
     }));
   }));
@@ -115,13 +115,13 @@ function remoteError() {
     assert.strictEqual(agent.sockets[name].length, 1);
     assert.strictEqual(agent.freeSockets[name], undefined);
     assert.strictEqual(agent.totalSocketCount, 1);
-    // Wait socket 'close' event emit
-    setTimeout(common.mustCall(() => {
+    // Wait for the socket's 'close' event.
+    req.socket.once('close', common.mustCall(() => {
       assert.strictEqual(agent.sockets[name], undefined);
       assert.strictEqual(agent.freeSockets[name], undefined);
       assert.strictEqual(agent.totalSocketCount, 0);
       server.close();
-    }), common.platformTimeout(1));
+    }));
   }));
 }
 
@@ -149,6 +149,8 @@ server.listen(0, common.mustCall(() => {
 function checkListeners(socket) {
   const callback = common.mustCall(() => {
     if (!socket.destroyed) {
+      // Sockets have no public stream guard listeners while in the free pool.
+      assert.strictEqual(socket.listenerCount('readable'), 0);
       assert.strictEqual(socket.listenerCount('data'), 0);
       assert.strictEqual(socket.listenerCount('drain'), 0);
       // Sockets have freeSocketErrorListener.

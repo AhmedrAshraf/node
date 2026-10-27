@@ -723,6 +723,7 @@ global	gcm_init_clmul
 ALIGN	16
 gcm_init_clmul:
 
+DB	243,15,30,250
 $L$_init_clmul:
 $L$SEH_begin_gcm_init_clmul:
 
@@ -1354,6 +1355,7 @@ global	gcm_init_avx
 ALIGN	32
 gcm_init_avx:
 
+DB	243,15,30,250
 $L$SEH_begin_gcm_init_avx:
 
 DB	0x48,0x83,0xec,0x18
@@ -1879,6 +1881,7 @@ $L$SEH_end_gcm_ghash_avx:
 	DB	0F3h,0C3h		;repret
 
 
+section	.rdata rdata align=64
 ALIGN	64
 $L$bswap_mask:
 DB	15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0
@@ -1932,9 +1935,10 @@ $L$rem_8bit:
 
 DB	71,72,65,83,72,32,102,111,114,32,120,56,54,95,54,52
 DB	44,32,67,82,89,80,84,79,71,65,77,83,32,98,121,32
-DB	60,97,112,112,114,111,64,111,112,101,110,115,115,108,46,111
-DB	114,103,62,0
+DB	60,104,116,116,112,115,58,47,47,103,105,116,104,117,98,46
+DB	99,111,109,47,100,111,116,45,97,115,109,62,0
 ALIGN	64
+section .text
 EXTERN	__imp_RtlVirtualUnwind
 
 ALIGN	16

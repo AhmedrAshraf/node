@@ -1,14 +1,12 @@
 'use strict'
 
-const Readable = require('./readable')
-const {
-  InvalidArgumentError,
-  RequestAbortedError,
-  ResponseStatusCodeError
-} = require('../core/errors')
+const assert = require('node:assert')
+const { AsyncResource } = require('node:async_hooks')
+const { Readable } = require('./readable')
+const { InvalidArgumentError, RequestAbortedError } = require('../core/errors')
 const util = require('../core/util')
-const { AsyncResource } = require('async_hooks')
-const { addSignal, removeSignal } = require('./abort-signal')
+
+function noop () {}
 
 class RequestHandler extends AsyncResource {
   constructor (opts, callback) {
@@ -16,11 +14,15 @@ class RequestHandler extends AsyncResource {
       throw new InvalidArgumentError('invalid opts')
     }
 
-    const { signal, method, opaque, body, onInfo, responseHeaders, throwOnError } = opts
+    const { signal, method, opaque, body, onInfo, responseHeaders, highWaterMark } = opts
 
     try {
       if (typeof callback !== 'function') {
         throw new InvalidArgumentError('invalid callback')
+      }
+
+      if (highWaterMark != null && (!Number.isFinite(highWaterMark) || highWaterMark < 0)) {
+        throw new InvalidArgumentError('invalid highWaterMark')
       }
 
       if (signal && typeof signal.on !== 'function' && typeof signal.addEventListener !== 'function') {
@@ -38,11 +40,12 @@ class RequestHandler extends AsyncResource {
       super('UNDICI_REQUEST')
     } catch (err) {
       if (util.isStream(body)) {
-        util.destroy(body.on('error', util.nop), err)
+        util.destroy(body.on('error', noop), err)
       }
       throw err
     }
 
+    this.method = method
     this.responseHeaders = responseHeaders || null
     this.opaque = opaque || null
     this.callback = callback
@@ -51,84 +54,137 @@ class RequestHandler extends AsyncResource {
     this.body = body
     this.trailers = {}
     this.context = null
+    this.controller = null
     this.onInfo = onInfo || null
-    this.throwOnError = throwOnError
+    this.highWaterMark = highWaterMark
+    this.reason = null
+    this.removeAbortListener = null
 
-    if (util.isStream(body)) {
-      body.on('error', (err) => {
-        this.onError(err)
+    if (signal?.aborted) {
+      this.reason = signal.reason ?? new RequestAbortedError()
+    } else if (signal) {
+      this.removeAbortListener = util.addAbortListener(signal, () => {
+        this.reason = signal.reason ?? new RequestAbortedError()
+        if (this.res) {
+          // Null the reference before destroying, mirroring onResponseError, so
+          // that chunks flushed after the abort (e.g. an async decompressor
+          // flush) are dropped by the `!this.res` guard in onResponseData
+          // instead of being pushed into the torn-down stream.
+          const res = this.res
+          this.res = null
+          util.destroy(res.on('error', noop), this.reason)
+        } else if (this.abort) {
+          this.abort(this.reason)
+        }
       })
     }
-
-    addSignal(this, signal)
   }
 
-  onConnect (abort, context) {
-    if (!this.callback) {
-      throw new RequestAbortedError()
+  onRequestStart (controller, context) {
+    if (this.reason) {
+      controller.abort(this.reason)
+      return
     }
 
-    this.abort = abort
+    assert(this.callback)
+
+    this.controller = controller
+    this.abort = (reason) => controller.abort(reason)
     this.context = context
   }
 
-  onHeaders (statusCode, rawHeaders, resume, statusMessage) {
-    const { callback, opaque, abort, context } = this
+  onResponseStart (controller, statusCode, headers, statusText) {
+    const { callback, opaque, context, responseHeaders, highWaterMark } = this
+
+    const rawHeaders = controller?.rawHeaders
+    const responseHeaderData = responseHeaders === 'raw'
+      ? util.parseRawHeaders(rawHeaders)
+      : headers
 
     if (statusCode < 200) {
       if (this.onInfo) {
-        const headers = this.responseHeaders === 'raw' ? util.parseRawHeaders(rawHeaders) : util.parseHeaders(rawHeaders)
-        this.onInfo({ statusCode, headers })
+        this.onInfo({ statusCode, headers: responseHeaderData })
       }
       return
     }
 
-    const parsedHeaders = util.parseHeaders(rawHeaders)
-    const contentType = parsedHeaders['content-type']
-    const body = new Readable(resume, abort, contentType)
+    const parsedHeaders = headers
+    const contentType = parsedHeaders?.['content-type']
+    const contentLength = parsedHeaders?.['content-length']
+    const res = new Readable({
+      resume: () => controller.resume(),
+      abort: (reason) => controller.abort(reason),
+      contentType,
+      contentLength: this.method !== 'HEAD' && contentLength
+        ? Number(contentLength)
+        : null,
+      highWaterMark
+    })
+
+    if (this.removeAbortListener) {
+      res.on('close', this.removeAbortListener)
+      this.removeAbortListener = null
+    }
 
     this.callback = null
-    this.res = body
-    const headers = this.responseHeaders === 'raw' ? util.parseRawHeaders(rawHeaders) : util.parseHeaders(rawHeaders)
-
+    this.res = res
     if (callback !== null) {
-      if (this.throwOnError && statusCode >= 400) {
-        this.runInAsyncScope(getResolveErrorBodyCallback, null,
-          { callback, body, contentType, statusCode, statusMessage, headers }
-        )
-        return
-      }
+      try {
+        this.runInAsyncScope(callback, null, null, {
+          statusCode,
+          statusText,
+          headers: responseHeaderData,
+          trailers: this.trailers,
+          opaque,
+          body: res,
+          context
+        })
+      } catch (err) {
+        // If the callback throws synchronously, we need to handle it
+        // Remove reference to res to allow res being garbage collected
+        this.res = null
 
-      this.runInAsyncScope(callback, null, null, {
-        statusCode,
-        headers,
-        trailers: this.trailers,
-        opaque,
-        body,
-        context
-      })
+        // Destroy the response stream
+        util.destroy(res.on('error', noop), err)
+
+        // Use queueMicrotask to re-throw the error so it reaches uncaughtException
+        queueMicrotask(() => {
+          throw err
+        })
+      }
     }
   }
 
-  onData (chunk) {
-    const { res } = this
-    return res.push(chunk)
+  onResponseData (controller, chunk) {
+    if (!this.res) {
+      return
+    }
+
+    if (this.res.push(chunk) === false) {
+      controller.pause()
+    }
   }
 
-  onComplete (trailers) {
-    const { res } = this
-
-    removeSignal(this)
-
-    util.parseHeaders(trailers, this.trailers)
-
-    res.push(null)
+  onResponseEnd (_controller, trailers) {
+    if (trailers && typeof trailers === 'object') {
+      for (const key of Object.keys(trailers)) {
+        if (key === '__proto__') {
+          Object.defineProperty(this.trailers, key, {
+            value: trailers[key],
+            enumerable: true,
+            configurable: true,
+            writable: true
+          })
+        } else {
+          this.trailers[key] = trailers[key]
+        }
+      }
+    }
+    this.res?.push(null)
   }
 
-  onError (err) {
+  onResponseError (_controller, err) {
     const { res, callback, body, opaque } = this
-
-    removeSignal(this)
 
     if (callback) {
       // TODO: Does this need queueMicrotask?
@@ -142,42 +198,24 @@ class RequestHandler extends AsyncResource {
       this.res = null
       // Ensure all queued handlers are invoked before destroying res.
       queueMicrotask(() => {
-        util.destroy(res, err)
+        util.destroy(res.on('error', noop), err)
       })
     }
 
     if (body) {
       this.body = null
-      util.destroy(body, err)
-    }
-  }
-}
 
-async function getResolveErrorBodyCallback ({ callback, body, contentType, statusCode, statusMessage, headers }) {
-  if (statusCode === 204 || !contentType) {
-    body.dump()
-    process.nextTick(callback, new ResponseStatusCodeError(`Response status code ${statusCode}${statusMessage ? `: ${statusMessage}` : ''}`, statusCode, headers))
-    return
-  }
-
-  try {
-    if (contentType.startsWith('application/json')) {
-      const payload = await body.json()
-      process.nextTick(callback, new ResponseStatusCodeError(`Response status code ${statusCode}${statusMessage ? `: ${statusMessage}` : ''}`, statusCode, headers, payload))
-      return
+      if (util.isStream(body)) {
+        body.on('error', noop)
+        util.destroy(body, err)
+      }
     }
 
-    if (contentType.startsWith('text/')) {
-      const payload = await body.text()
-      process.nextTick(callback, new ResponseStatusCodeError(`Response status code ${statusCode}${statusMessage ? `: ${statusMessage}` : ''}`, statusCode, headers, payload))
-      return
+    if (this.removeAbortListener) {
+      this.removeAbortListener()
+      this.removeAbortListener = null
     }
-  } catch (err) {
-    // Process in a fallback if error
   }
-
-  body.dump()
-  process.nextTick(callback, new ResponseStatusCodeError(`Response status code ${statusCode}${statusMessage ? `: ${statusMessage}` : ''}`, statusCode, headers))
 }
 
 function request (opts, callback) {
@@ -190,14 +228,17 @@ function request (opts, callback) {
   }
 
   try {
-    this.dispatch(opts, new RequestHandler(opts, callback))
+    const handler = new RequestHandler(opts, callback)
+
+    this.dispatch(opts, handler)
   } catch (err) {
     if (typeof callback !== 'function') {
       throw err
     }
-    const opaque = opts && opts.opaque
+    const opaque = opts?.opaque
     queueMicrotask(() => callback(err, { opaque }))
   }
 }
 
 module.exports = request
+module.exports.RequestHandler = RequestHandler

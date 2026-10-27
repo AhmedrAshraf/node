@@ -7,7 +7,6 @@ const tmpdir = require('../common/tmpdir');
 // The following tests validate aggregate errors are thrown correctly
 // when both an operation and close throw.
 
-const path = require('path');
 const {
   readFile,
   writeFile,
@@ -23,8 +22,11 @@ const originalFd = Object.getOwnPropertyDescriptor(FileHandle.prototype, 'fd');
 
 let count = 0;
 async function createFile() {
-  const filePath = path.join(tmpdir.path, `op_errors_${++count}.txt`);
-  await writeFile(filePath, 'content');
+  const filePath = tmpdir.resolve(`op_errors_${++count}.txt`);
+  // Larger than one read chunk (512 KiB), so that readFile(path) reads it
+  // through a FileHandle (small files are read in a single native round trip
+  // that does not involve FileHandle.prototype).
+  await writeFile(filePath, 'content'.repeat(100_000));
   return filePath;
 }
 
@@ -32,13 +34,13 @@ async function checkOperationError(op) {
   try {
     const filePath = await createFile();
     Object.defineProperty(FileHandle.prototype, 'fd', {
-      get: function() {
+      get: common.mustCall(function() {
         // Verify that close is called when an error is thrown
         this.close = common.mustCall(this.close);
         const opError = new Error('INTERNAL_ERROR');
         opError.code = 123;
         throw opError;
-      }
+      }),
     });
 
     await assert.rejects(op(filePath), {
@@ -54,8 +56,10 @@ async function checkOperationError(op) {
   tmpdir.refresh();
   await checkOperationError((filePath) => truncate(filePath));
   await checkOperationError((filePath) => readFile(filePath));
-  await checkOperationError((filePath) => writeFile(filePath, '123'));
-  if (common.isOSX) {
+  // More than one write chunk (512 KiB), so that writeFile(path) goes through
+  // a FileHandle as well.
+  await checkOperationError((filePath) => writeFile(filePath, '123'.repeat(200_000)));
+  if (common.isMacOS) {
     await checkOperationError((filePath) => lchmod(filePath, 0o777));
   }
 })().then(common.mustCall());

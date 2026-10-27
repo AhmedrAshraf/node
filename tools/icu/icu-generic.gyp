@@ -139,20 +139,43 @@
               # full data - just build the full data file, then we are done.
               'sources': [ '<(SHARED_INTERMEDIATE_DIR)/icudt<(icu_ver_major)<(icu_endianness)_dat.<(icu_asm_ext)' ],
               'dependencies': [ 'genccode#host' ],
-              'actions': [
-                {
-                  'action_name': 'icudata',
-                  'msvs_quote_cmd': 0,
-                  'inputs': [ '<(icu_data_in)' ],
-                  'outputs': [ '<(SHARED_INTERMEDIATE_DIR)/icudt<(icu_ver_major)<(icu_endianness)_dat.<(icu_asm_ext)' ],
-                  # on Windows, we can go directly to .obj file (-o) option.
-                  'action': [ '<(PRODUCT_DIR)/genccode<(EXECUTABLE_SUFFIX)',
-                              '<@(icu_asm_opts)', # -o
-                              '-d', '<(SHARED_INTERMEDIATE_DIR)',
-                              '-n', 'icudata',
-                              '-e', 'icudt<(icu_ver_major)',
-                              '<@(_inputs)' ],
-                },
+              'conditions': [
+                [ 'clang==1', {
+                  'actions': [
+                    {
+                      'action_name': 'icudata',
+                      'msvs_quote_cmd': 0,
+                      'inputs': [ '<(icu_data_in)' ],
+                      'outputs': [ '<(SHARED_INTERMEDIATE_DIR)/icudt<(icu_ver_major)<(icu_endianness)_dat.<(icu_asm_ext)' ],
+                      # on Windows, we can go directly to .obj file (-o) option.
+                      # for Clang use "-c <(target_arch)" option
+                      'action': [ '<(PRODUCT_DIR)/genccode<(EXECUTABLE_SUFFIX)',
+                                  '<@(icu_asm_opts)', # -o
+                                  '-c', '<(target_arch)',
+                                  '-d', '<(SHARED_INTERMEDIATE_DIR)',
+                                  '-n', 'icudata',
+                                  '-e', 'icudt<(icu_ver_major)',
+                                  '<@(_inputs)' ],
+                    },
+                  ],
+                }, {
+                  'actions': [
+                    {
+                      'action_name': 'icudata',
+                      'msvs_quote_cmd': 0,
+                      'inputs': [ '<(icu_data_in)' ],
+                      'outputs': [ '<(SHARED_INTERMEDIATE_DIR)/icudt<(icu_ver_major)<(icu_endianness)_dat.<(icu_asm_ext)' ],
+                      # on Windows, we can go directly to .obj file (-o) option.
+                      # for MSVC do not use "-c <(target_arch)" option
+                      'action': [ '<(PRODUCT_DIR)/genccode<(EXECUTABLE_SUFFIX)',
+                                  '<@(icu_asm_opts)', # -o
+                                  '-d', '<(SHARED_INTERMEDIATE_DIR)',
+                                  '-n', 'icudata',
+                                  '-e', 'icudt<(icu_ver_major)',
+                                  '<@(_inputs)' ],
+                    },
+                  ],
+                }]
               ],
             }, { # icu_small == TRUE and OS == win
               # link against stub data primarily
@@ -185,6 +208,7 @@
                   'outputs': [ '<(SHARED_INTERMEDIATE_DIR)/icudt<(icu_ver_major)<(icu_endianness)_dat.<(icu_asm_ext)' ],
                   'action': [ '<(PRODUCT_DIR)/genccode<(EXECUTABLE_SUFFIX)',
                               '<@(icu_asm_opts)', # -o
+                              '-c', '<(target_arch)',
                               '-d', '<(SHARED_INTERMEDIATE_DIR)/',
                               '-n', 'icudata',
                               '-e', 'icusmdt<(icu_ver_major)',
@@ -428,6 +452,22 @@
         '<@(icu_src_derb)',
         'no-op.cc',
       ],
+      'conditions': [
+        # Avoid excessive LTO
+        ['enable_lto=="true"', {
+          'ldflags': [ '-fno-lto' ],
+        }],
+        ['node_with_ltcg=="true" or enable_lto=="true" or enable_thin_lto=="true"', {
+          'msvs_settings': {
+            'VCCLCompilerTool': {
+              'AdditionalOptions': ['-fno-lto'],
+            },
+            'VCLinkerTool': {
+              'AdditionalOptions': ['-fno-lto'],
+            },
+          },
+        }],
+      ],
     },
     # This tool is used to rebuild res_index.res manifests
     {
@@ -438,6 +478,22 @@
       'sources': [
         'iculslocs.cc',
         'no-op.cc',
+      ],
+      'conditions': [
+        # Avoid excessive LTO
+        ['enable_lto=="true"', {
+          'ldflags': [ '-fno-lto' ],
+        }],
+        ['node_with_ltcg=="true" or enable_lto=="true" or enable_thin_lto=="true"', {
+          'msvs_settings': {
+            'VCCLCompilerTool': {
+              'AdditionalOptions': ['-fno-lto'],
+            },
+            'VCLinkerTool': {
+              'AdditionalOptions': ['-fno-lto'],
+            },
+          },
+        }],
       ],
     },
     # This tool is used to package, unpackage, repackage .dat files
@@ -451,6 +507,22 @@
         '<@(icu_src_icupkg)',
         'no-op.cc',
       ],
+      'conditions': [
+        # Avoid excessive LTO
+        ['enable_lto=="true"', {
+          'ldflags': [ '-fno-lto' ],
+        }],
+        ['node_with_ltcg=="true" or enable_lto=="true" or enable_thin_lto=="true"', {
+          'msvs_settings': {
+            'VCCLCompilerTool': {
+              'AdditionalOptions': ['-fno-lto'],
+            },
+            'VCLinkerTool': {
+              'AdditionalOptions': ['-fno-lto'],
+            },
+          },
+        }],
+      ],
     },
     # this is used to convert .dat directly into .obj
     {
@@ -461,6 +533,22 @@
       'sources': [
         '<@(icu_src_genccode)',
         'no-op.cc',
+      ],
+      'conditions': [
+        # Avoid excessive LTO
+        ['enable_lto=="true"', {
+          'ldflags': [ '-fno-lto' ],
+        }],
+        ['node_with_ltcg=="true" or enable_lto=="true" or enable_thin_lto=="true"', {
+          'msvs_settings': {
+            'VCCLCompilerTool': {
+              'AdditionalOptions': ['-fno-lto'],
+            },
+            'VCLinkerTool': {
+              'AdditionalOptions': ['-fno-lto'],
+            },
+          },
+        }],
       ],
     },
   ],

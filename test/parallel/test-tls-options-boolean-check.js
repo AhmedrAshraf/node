@@ -1,6 +1,8 @@
 'use strict';
 
 const common = require('../common');
+
+const { isBoringSSL } = require('../common/crypto');
 const fixtures = require('../common/fixtures');
 
 if (!common.hasCrypto)
@@ -42,7 +44,7 @@ const caArrDataView = toDataView(caCert);
 
 // Checks to ensure tls.createServer doesn't throw an error
 // Format ['key', 'cert']
-[
+const validOptions = [
   [keyBuff, certBuff],
   [false, certBuff],
   [keyBuff, false],
@@ -56,19 +58,28 @@ const caArrDataView = toDataView(caCert);
   [keyDataView, certDataView],
   [keyDataView, false],
   [false, certDataView],
-  [[keyBuff, keyBuff2], [certBuff, certBuff2]],
-  [[keyStr, keyStr2], [certStr, certStr2]],
   [[keyStr, keyStr2], false],
   [false, [certStr, certStr2]],
   [[{ pem: keyBuff }], false],
   [[{ pem: keyBuff }, { pem: keyBuff }], false],
-].forEach(([key, cert]) => {
+];
+
+// Node's BoringSSL setup keeps one identity, so mixed RSA/EC key and
+// certificate arrays fail with a key-type mismatch before option validation.
+if (!isBoringSSL) {
+  validOptions.push(
+    [[keyBuff, keyBuff2], [certBuff, certBuff2]],
+    [[keyStr, keyStr2], [certStr, certStr2]],
+  );
+}
+
+validOptions.forEach(([key, cert]) => {
   tls.createServer({ key, cert });
 });
 
 // Checks to ensure tls.createServer predictably throws an error
 // Format ['key', 'cert', 'expected message']
-[
+const invalidKeyOptions = [
   [true, certBuff],
   [true, certStr],
   [true, certArrBuff],
@@ -76,11 +87,18 @@ const caArrDataView = toDataView(caCert);
   [true, false],
   [true, false],
   [{ pem: keyBuff }, false],
-  [[keyBuff, true], [certBuff, certBuff2], 1],
   [[true, keyStr2], [certStr, certStr2], 0],
   [[true, false], [certBuff, certBuff2], 0],
   [true, [certBuff, certBuff2]],
-].forEach(([key, cert, index]) => {
+];
+
+// With both certificates loaded, BoringSSL rejects the RSA key against the
+// last (EC) certificate before reaching the invalid second key.
+if (!isBoringSSL) {
+  invalidKeyOptions.push([[keyBuff, true], [certBuff, certBuff2], 1]);
+}
+
+for (const [key, cert, index] of invalidKeyOptions) {
   const val = index === undefined ? key : key[index];
   assert.throws(() => {
     tls.createServer({ key, cert });
@@ -91,9 +109,9 @@ const caArrDataView = toDataView(caCert);
              'instance of Buffer, TypedArray, or DataView.' +
              common.invalidArgTypeHelper(val)
   });
-});
+}
 
-[
+const invalidCertOptions = [
   [keyBuff, true],
   [keyStr, true],
   [keyArrBuff, true],
@@ -106,7 +124,9 @@ const caArrDataView = toDataView(caCert);
   [[keyStr, keyStr2], [certStr, true], 1],
   [[keyStr, keyStr2], [true, false], 0],
   [[keyStr, keyStr2], true],
-].forEach(([key, cert, index]) => {
+];
+
+for (const [key, cert, index] of invalidCertOptions) {
   const val = index === undefined ? cert : cert[index];
   assert.throws(() => {
     tls.createServer({ key, cert });
@@ -117,7 +137,7 @@ const caArrDataView = toDataView(caCert);
              'instance of Buffer, TypedArray, or DataView.' +
              common.invalidArgTypeHelper(val)
   });
-});
+}
 
 // Checks to ensure tls.createServer works with the CA parameter
 // Format ['key', 'cert', 'ca']

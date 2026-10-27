@@ -27,8 +27,11 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-
 #include "gtest/gtest-typed-test.h"
+
+#include <set>
+#include <string>
+#include <vector>
 
 #include "gtest/gtest.h"
 
@@ -38,8 +41,7 @@ namespace internal {
 // Skips to the first non-space char in str. Returns an empty string if str
 // contains only whitespace characters.
 static const char* SkipSpaces(const char* str) {
-  while (IsSpace(*str))
-    str++;
+  while (IsSpace(*str)) str++;
   return str;
 }
 
@@ -60,7 +62,6 @@ const char* TypedTestSuitePState::VerifyRegisteredTestNames(
     const char* registered_tests) {
   RegisterTypeParameterizedTestSuite(test_suite_name, CodeLocation(file, line));
 
-  typedef RegisteredTestsMap::const_iterator RegisteredTestIter;
   registered_ = true;
 
   std::vector<std::string> name_vec = SplitIntoTestNames(registered_tests);
@@ -76,7 +77,7 @@ const char* TypedTestSuitePState::VerifyRegisteredTestNames(
       continue;
     }
 
-    if (registered_tests_.count(name) != 0) {
+    if (TestExists(name)) {
       tests.insert(name);
     } else {
       errors << "No test named " << name
@@ -84,16 +85,15 @@ const char* TypedTestSuitePState::VerifyRegisteredTestNames(
     }
   }
 
-  for (RegisteredTestIter it = registered_tests_.begin();
-       it != registered_tests_.end();
-       ++it) {
-    if (tests.count(it->first) == 0) {
-      errors << "You forgot to list test " << it->first << ".\n";
+  for (const RegisteredTest* it = registered_tests_; it != nullptr;
+       it = it->next) {
+    if (tests.count(it->name) == 0) {
+      errors << "You forgot to list test " << it->name << ".\n";
     }
   }
 
   const std::string& errors_str = errors.GetString();
-  if (errors_str != "") {
+  if (!errors_str.empty()) {
     fprintf(stderr, "%s %s", FormatFileLocation(file, line).c_str(),
             errors_str.c_str());
     fflush(stderr);

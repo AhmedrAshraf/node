@@ -7,7 +7,11 @@ const bench = common.createBenchmark(main, {
   e: [1],
   prop: ['href', 'origin', 'protocol',
          'username', 'password', 'host', 'hostname', 'port',
-         'pathname', 'search', 'searchParams', 'hash']
+         'pathname', 'search', 'searchParams', 'hash'],
+}, {
+  test: {
+    type: 'short',
+  },
 });
 
 function setAndGet(data, prop) {

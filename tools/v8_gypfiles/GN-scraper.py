@@ -2,8 +2,9 @@
 # Use of this source code is governed by an MIT-style license.
 import re
 import os
+import sys
 
-PLAIN_SOURCE_RE = re.compile('\s*"([^/$].+)"\s*')
+PLAIN_SOURCE_RE = re.compile(r'\s*"([^/$].+)"\s*')
 def DoMain(args):
   gn_filename, pattern = args
   src_root = os.path.dirname(gn_filename)
@@ -12,6 +13,8 @@ def DoMain(args):
 
   scraper_re = re.compile(pattern + r'\[([^\]]+)', re.DOTALL)
   matches = scraper_re.search(gn_content)
+  if not matches:
+    raise Exception('Pattern "%s" not found in %s' % (pattern, gn_filename))
   match = matches.group(1)
   files = []
   for l in match.splitlines():
@@ -22,3 +25,6 @@ def DoMain(args):
   # always use `/` since GYP will process paths further downstream
   rel_files = ['"%s/%s"' % (src_root, f) for f in files]
   return ' '.join(rel_files)
+
+if __name__ == '__main__':
+  print(DoMain(sys.argv[1:]))

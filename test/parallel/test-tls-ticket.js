@@ -20,7 +20,9 @@
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 'use strict';
+
 const common = require('../common');
+const { isBoringSSL } = require('../common/crypto');
 if (!common.hasCrypto)
   common.skip('missing crypto');
 
@@ -29,6 +31,12 @@ const tls = require('tls');
 const net = require('net');
 const crypto = require('crypto');
 const fixtures = require('../common/fixtures');
+
+if (isBoringSSL &&
+    tls.DEFAULT_MAX_VERSION !== 'TLSv1.2') {
+  require('../common/boringssl').testTls13SessionTicketSemanticsDiffer();
+  return;
+}
 
 const keys = crypto.randomBytes(48);
 const serverLog = [];
@@ -47,7 +55,7 @@ function createServer() {
     key: fixtures.readKey('agent1-key.pem'),
     cert: fixtures.readKey('agent1-cert.pem'),
     ticketKeys: keys
-  }, function(c) {
+  }, common.mustCallAtLeast(function(c) {
     serverLog.push(id);
     // TODO(@sam-github) Triggers close_notify before NewSessionTicket bug.
     // c.end();
@@ -85,7 +93,7 @@ function createServer() {
     } else {
       throw new Error('UNREACHABLE');
     }
-  });
+  }));
 
   return server;
 }
@@ -135,7 +143,7 @@ function start(callback) {
         connect();
     });
     s.on('session', (session) => {
-      sess = sess || session;
+      sess ||= session;
     });
     s.once('session', (session) => onNewSession(s, session));
     s.once('session', () => ticketLog.push(s.getTLSTicket().toString('hex')));

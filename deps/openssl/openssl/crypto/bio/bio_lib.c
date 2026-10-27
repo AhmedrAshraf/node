@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -20,12 +20,12 @@
  * len parameter or not
  */
 #define HAS_LEN_OPER(o) ((o) == BIO_CB_READ || (o) == BIO_CB_WRITE \
-                         || (o) == BIO_CB_GETS)
+    || (o) == BIO_CB_GETS)
 
 #ifndef OPENSSL_NO_DEPRECATED_3_0
-# define HAS_CALLBACK(b) ((b)->callback != NULL || (b)->callback_ex != NULL)
+#define HAS_CALLBACK(b) ((b)->callback != NULL || (b)->callback_ex != NULL)
 #else
-# define HAS_CALLBACK(b) ((b)->callback_ex != NULL)
+#define HAS_CALLBACK(b) ((b)->callback_ex != NULL)
 #endif
 /*
  * Helper function to work out whether to call the new style callback or the old
@@ -35,8 +35,8 @@
  * for the "long" used for "inret"
  */
 static long bio_call_callback(BIO *b, int oper, const char *argp, size_t len,
-                              int argi, long argl, long inret,
-                              size_t *processed)
+    int argi, long argl, long inret,
+    size_t *processed)
 {
     long ret = inret;
 #ifndef OPENSSL_NO_DEPRECATED_3_0
@@ -65,7 +65,7 @@ static long bio_call_callback(BIO *b, int oper, const char *argp, size_t len,
     if (inret > 0 && (oper & BIO_CB_RETURN) && bareoper != BIO_CB_CTRL) {
         if (*processed > INT_MAX)
             return -1;
-        inret = *processed;
+        inret = (long)*processed;
     }
 
     ret = b->callback(b, oper, argp, argi, argl, inret);
@@ -82,30 +82,22 @@ BIO *BIO_new_ex(OSSL_LIB_CTX *libctx, const BIO_METHOD *method)
 {
     BIO *bio = OPENSSL_zalloc(sizeof(*bio));
 
-    if (bio == NULL) {
-        ERR_raise(ERR_LIB_BIO, ERR_R_MALLOC_FAILURE);
+    if (bio == NULL)
         return NULL;
-    }
 
     bio->libctx = libctx;
     bio->method = method;
     bio->shutdown = 1;
-    bio->references = 1;
+
+    if (!CRYPTO_NEW_REF(&bio->references, 1))
+        goto err;
 
     if (!CRYPTO_new_ex_data(CRYPTO_EX_INDEX_BIO, bio, &bio->ex_data))
         goto err;
 
-    bio->lock = CRYPTO_THREAD_lock_new();
-    if (bio->lock == NULL) {
-        ERR_raise(ERR_LIB_BIO, ERR_R_MALLOC_FAILURE);
-        CRYPTO_free_ex_data(CRYPTO_EX_INDEX_BIO, bio, &bio->ex_data);
-        goto err;
-    }
-
     if (method->create != NULL && !method->create(bio)) {
         ERR_raise(ERR_LIB_BIO, ERR_R_INIT_FAIL);
         CRYPTO_free_ex_data(CRYPTO_EX_INDEX_BIO, bio, &bio->ex_data);
-        CRYPTO_THREAD_lock_free(bio->lock);
         goto err;
     }
     if (method->create == NULL)
@@ -114,6 +106,7 @@ BIO *BIO_new_ex(OSSL_LIB_CTX *libctx, const BIO_METHOD *method)
     return bio;
 
 err:
+    CRYPTO_FREE_REF(&bio->references);
     OPENSSL_free(bio);
     return NULL;
 }
@@ -123,24 +116,22 @@ BIO *BIO_new(const BIO_METHOD *method)
     return BIO_new_ex(NULL, method);
 }
 
-int BIO_free(BIO *a)
+static int BIO_free_int(BIO *a, int *ret)
 {
-    int ret;
 
     if (a == NULL)
         return 0;
 
-    if (CRYPTO_DOWN_REF(&a->references, &ret, a->lock) <= 0)
+    if (CRYPTO_DOWN_REF(&a->references, ret) <= 0)
         return 0;
 
-    REF_PRINT_COUNT("BIO", a);
-    if (ret > 0)
+    REF_PRINT_COUNT("BIO", *ret, a);
+    if (*ret > 0)
         return 1;
-    REF_ASSERT_ISNT(ret < 0);
+    REF_ASSERT_ISNT(*ret < 0);
 
     if (HAS_CALLBACK(a)) {
-        ret = (int)bio_call_callback(a, BIO_CB_FREE, NULL, 0, 0, 0L, 1L, NULL);
-        if (ret <= 0)
+        if ((int)bio_call_callback(a, BIO_CB_FREE, NULL, 0, 0, 0L, 1L, NULL) <= 0)
             return 0;
     }
 
@@ -149,11 +140,18 @@ int BIO_free(BIO *a)
 
     CRYPTO_free_ex_data(CRYPTO_EX_INDEX_BIO, a, &a->ex_data);
 
-    CRYPTO_THREAD_lock_free(a->lock);
+    CRYPTO_FREE_REF(&a->references);
 
     OPENSSL_free(a);
 
     return 1;
+}
+
+int BIO_free(BIO *b)
+{
+    int ref;
+
+    return BIO_free_int(b, &ref);
 }
 
 void BIO_set_data(BIO *a, void *ptr)
@@ -195,10 +193,10 @@ int BIO_up_ref(BIO *a)
 {
     int i;
 
-    if (CRYPTO_UP_REF(&a->references, &i, a->lock) <= 0)
+    if (!CRYPTO_UP_REF(&a->references, &i))
         return 0;
 
-    REF_PRINT_COUNT("BIO", a);
+    REF_PRINT_COUNT("BIO", i, a);
     REF_ASSERT_ISNT(i < 2);
     return i > 1;
 }
@@ -216,6 +214,11 @@ int BIO_test_flags(const BIO *b, int flags)
 void BIO_set_flags(BIO *b, int flags)
 {
     b->flags |= flags;
+}
+
+long BIO_set_send_flags(BIO *b, int flags)
+{
+    return BIO_ctrl(b, BIO_C_SET_SEND_FLAGS, (long)flags, NULL);
 }
 
 #ifndef OPENSSL_NO_DEPRECATED_3_0
@@ -261,10 +264,14 @@ int BIO_method_type(const BIO *b)
 }
 
 /*
- * This is essentially the same as BIO_read_ex() except that it allows
- * 0 or a negative value to indicate failure (retryable or not) in the return.
- * This is for compatibility with the old style BIO_read(), where existing code
- * may make assumptions about the return value that it might get.
+ * Internal BIO read function. Attempts to read dlen bytes from BIO b and
+ * places them in data. If any bytes were successfully read, then the number
+ * of bytes read is stored in readbytes.
+ * For compatibility with the old-style BIO_read() API, the function uses a
+ * return-value convention where a positive value indicates success,
+ * 0 indicates end-of-file, and a negative value indicates an error
+ * (including retryable errors).
+ * It also returns 0 if dlen==0.
  */
 static int bio_read_intern(BIO *b, void *data, size_t dlen, size_t *readbytes)
 {
@@ -279,9 +286,7 @@ static int bio_read_intern(BIO *b, void *data, size_t dlen, size_t *readbytes)
         return -2;
     }
 
-    if (HAS_CALLBACK(b) &&
-        ((ret = (int)bio_call_callback(b, BIO_CB_READ, data, dlen, 0, 0L, 1L,
-                                       NULL)) <= 0))
+    if (HAS_CALLBACK(b) && ((ret = (int)bio_call_callback(b, BIO_CB_READ, data, dlen, 0, 0L, 1L, NULL)) <= 0))
         return ret;
 
     if (!b->init) {
@@ -294,9 +299,16 @@ static int bio_read_intern(BIO *b, void *data, size_t dlen, size_t *readbytes)
     if (ret > 0)
         b->num_read += (uint64_t)*readbytes;
 
+    /*
+     * If method->bread() returned 0 when dlen>0, it can be either EOF or
+     * an error, and we should distinguish them
+     */
+    if (ret == 0 && dlen > 0 && BIO_eof(b) == 0)
+        ret = -1;
+
     if (HAS_CALLBACK(b))
         ret = (int)bio_call_callback(b, BIO_CB_READ | BIO_CB_RETURN, data,
-                                     dlen, 0, 0L, ret, readbytes);
+            dlen, 0, 0L, ret, readbytes);
 
     /* Shouldn't happen */
     if (ret > 0 && *readbytes > dlen) {
@@ -312,8 +324,10 @@ int BIO_read(BIO *b, void *data, int dlen)
     size_t readbytes;
     int ret;
 
-    if (dlen < 0)
-        return 0;
+    if (dlen < 0) {
+        ERR_raise(ERR_LIB_BIO, ERR_R_PASSED_INVALID_ARGUMENT);
+        return -1;
+    }
 
     ret = bio_read_intern(b, data, (size_t)dlen, &readbytes);
 
@@ -331,7 +345,7 @@ int BIO_read_ex(BIO *b, void *data, size_t dlen, size_t *readbytes)
 }
 
 static int bio_write_intern(BIO *b, const void *data, size_t dlen,
-                            size_t *written)
+    size_t *written)
 {
     size_t local_written;
     int ret;
@@ -350,9 +364,7 @@ static int bio_write_intern(BIO *b, const void *data, size_t dlen,
         return -2;
     }
 
-    if (HAS_CALLBACK(b) &&
-        ((ret = (int)bio_call_callback(b, BIO_CB_WRITE, data, dlen, 0, 0L, 1L,
-                                       NULL)) <= 0))
+    if (HAS_CALLBACK(b) && ((ret = (int)bio_call_callback(b, BIO_CB_WRITE, data, dlen, 0, 0L, 1L, NULL)) <= 0))
         return ret;
 
     if (!b->init) {
@@ -367,7 +379,7 @@ static int bio_write_intern(BIO *b, const void *data, size_t dlen,
 
     if (HAS_CALLBACK(b))
         ret = (int)bio_call_callback(b, BIO_CB_WRITE | BIO_CB_RETURN, data,
-                                     dlen, 0, 0L, ret, &local_written);
+            dlen, 0, 0L, ret, &local_written);
 
     if (written != NULL)
         *written = local_written;
@@ -396,6 +408,110 @@ int BIO_write_ex(BIO *b, const void *data, size_t dlen, size_t *written)
 {
     return bio_write_intern(b, data, dlen, written) > 0
         || (b != NULL && dlen == 0); /* order is important for *written */
+}
+
+int BIO_sendmmsg(BIO *b, BIO_MSG *msg,
+    size_t stride, size_t num_msg, uint64_t flags,
+    size_t *msgs_processed)
+{
+    size_t ret;
+    BIO_MMSG_CB_ARGS args;
+
+    if (b == NULL) {
+        *msgs_processed = 0;
+        ERR_raise(ERR_LIB_BIO, ERR_R_PASSED_NULL_PARAMETER);
+        return 0;
+    }
+
+    if (b->method == NULL || b->method->bsendmmsg == NULL) {
+        *msgs_processed = 0;
+        ERR_raise(ERR_LIB_BIO, BIO_R_UNSUPPORTED_METHOD);
+        return 0;
+    }
+
+    if (HAS_CALLBACK(b)) {
+        args.msg = msg;
+        args.stride = stride;
+        args.num_msg = num_msg;
+        args.flags = flags;
+        args.msgs_processed = msgs_processed;
+
+        ret = (size_t)bio_call_callback(b, BIO_CB_SENDMMSG, (void *)&args,
+            0, 0, 0, 1, NULL);
+        if (ret <= 0)
+            return 0;
+    }
+
+    if (!b->init) {
+        *msgs_processed = 0;
+        ERR_raise(ERR_LIB_BIO, BIO_R_UNINITIALIZED);
+        return 0;
+    }
+
+    ret = b->method->bsendmmsg(b, msg, stride, num_msg, flags, msgs_processed);
+
+    if (HAS_CALLBACK(b))
+        ret = (size_t)bio_call_callback(b, BIO_CB_SENDMMSG | BIO_CB_RETURN,
+            (void *)&args, ret, 0, 0, (long)ret, msgs_processed);
+
+    return ret > 0;
+}
+
+int BIO_recvmmsg(BIO *b, BIO_MSG *msg,
+    size_t stride, size_t num_msg, uint64_t flags,
+    size_t *msgs_processed)
+{
+    size_t ret;
+    BIO_MMSG_CB_ARGS args;
+
+    if (b == NULL) {
+        *msgs_processed = 0;
+        ERR_raise(ERR_LIB_BIO, ERR_R_PASSED_NULL_PARAMETER);
+        return 0;
+    }
+
+    if (b->method == NULL || b->method->brecvmmsg == NULL) {
+        *msgs_processed = 0;
+        ERR_raise(ERR_LIB_BIO, BIO_R_UNSUPPORTED_METHOD);
+        return 0;
+    }
+
+    if (HAS_CALLBACK(b)) {
+        args.msg = msg;
+        args.stride = stride;
+        args.num_msg = num_msg;
+        args.flags = flags;
+        args.msgs_processed = msgs_processed;
+
+        ret = bio_call_callback(b, BIO_CB_RECVMMSG, (void *)&args,
+            0, 0, 0, 1, NULL);
+        if (ret <= 0)
+            return 0;
+    }
+
+    if (!b->init) {
+        *msgs_processed = 0;
+        ERR_raise(ERR_LIB_BIO, BIO_R_UNINITIALIZED);
+        return 0;
+    }
+
+    ret = b->method->brecvmmsg(b, msg, stride, num_msg, flags, msgs_processed);
+
+    if (HAS_CALLBACK(b))
+        ret = (size_t)bio_call_callback(b, BIO_CB_RECVMMSG | BIO_CB_RETURN,
+            (void *)&args, ret, 0, 0, (long)ret, msgs_processed);
+
+    return ret > 0;
+}
+
+int BIO_get_rpoll_descriptor(BIO *b, BIO_POLL_DESCRIPTOR *desc)
+{
+    return BIO_ctrl(b, BIO_CTRL_GET_RPOLL_DESCRIPTOR, 0, desc);
+}
+
+int BIO_get_wpoll_descriptor(BIO *b, BIO_POLL_DESCRIPTOR *desc)
+{
+    return BIO_ctrl(b, BIO_CTRL_GET_WPOLL_DESCRIPTOR, 0, desc);
 }
 
 int BIO_puts(BIO *b, const char *buf)
@@ -433,7 +549,7 @@ int BIO_puts(BIO *b, const char *buf)
 
     if (HAS_CALLBACK(b))
         ret = (int)bio_call_callback(b, BIO_CB_PUTS | BIO_CB_RETURN, buf, 0, 0,
-                                     0L, ret, &written);
+            0L, ret, &written);
 
     if (ret > 0) {
         if (written > INT_MAX) {
@@ -486,7 +602,7 @@ int BIO_gets(BIO *b, char *buf, int size)
 
     if (HAS_CALLBACK(b))
         ret = (int)bio_call_callback(b, BIO_CB_GETS | BIO_CB_RETURN, buf, size,
-                                     0, 0L, ret, &readbytes);
+            0, 0L, ret, &readbytes);
 
     if (ret > 0) {
         /* Shouldn't happen */
@@ -527,7 +643,7 @@ int BIO_get_line(BIO *bio, char *buf, int size)
         if (*ptr++ == '\n')
             break;
     *ptr = '\0';
-    return ret > 0 || BIO_eof(bio) ? ptr - buf : ret;
+    return ret > 0 || BIO_eof(bio) ? (int)(ptr - buf) : ret;
 }
 
 int BIO_indent(BIO *b, int indent, int max)
@@ -581,9 +697,16 @@ long BIO_ctrl(BIO *b, int cmd, long larg, void *parg)
 
     if (HAS_CALLBACK(b))
         ret = bio_call_callback(b, BIO_CB_CTRL | BIO_CB_RETURN, parg, 0, cmd,
-                                larg, ret, NULL);
+            larg, ret, NULL);
 
     return ret;
+}
+
+int BIO_eof(BIO *b)
+{
+    if ((b->flags & BIO_FLAGS_AUTO_EOF) != 0)
+        return 1;
+    return (int)BIO_ctrl(b, BIO_CTRL_EOF, 0, NULL);
 }
 
 long BIO_callback_ctrl(BIO *b, int cmd, BIO_info_cb *fp)
@@ -593,14 +716,14 @@ long BIO_callback_ctrl(BIO *b, int cmd, BIO_info_cb *fp)
     if (b == NULL)
         return -2;
     if (b->method == NULL || b->method->callback_ctrl == NULL
-            || cmd != BIO_CTRL_SET_CALLBACK) {
+        || cmd != BIO_CTRL_SET_CALLBACK) {
         ERR_raise(ERR_LIB_BIO, BIO_R_UNSUPPORTED_METHOD);
         return -2;
     }
 
     if (HAS_CALLBACK(b)) {
         ret = bio_call_callback(b, BIO_CB_CTRL, (void *)&fp, 0, cmd, 0, 1L,
-                                NULL);
+            NULL);
         if (ret <= 0)
             return ret;
     }
@@ -609,7 +732,7 @@ long BIO_callback_ctrl(BIO *b, int cmd, BIO_info_cb *fp)
 
     if (HAS_CALLBACK(b))
         ret = bio_call_callback(b, BIO_CB_CTRL | BIO_CB_RETURN, (void *)&fp, 0,
-                                cmd, 0, ret, NULL);
+            cmd, 0, ret, NULL);
 
     return ret;
 }
@@ -720,7 +843,7 @@ BIO *BIO_find_type(BIO *bio, int type)
         ERR_raise(ERR_LIB_BIO, ERR_R_PASSED_NULL_PARAMETER);
         return NULL;
     }
-    mask = type & 0xff;
+    mask = type & BIO_TYPE_MASK;
     do {
         if (bio->method != NULL) {
             mt = bio->method->type;
@@ -756,11 +879,11 @@ void BIO_free_all(BIO *bio)
 
     while (bio != NULL) {
         b = bio;
-        ref = b->references;
         bio = bio->next_bio;
-        BIO_free(b);
-        /* Since ref count > 1, don't free anyone else. */
-        if (ref > 1)
+        ref = 0;
+        BIO_free_int(b, &ref);
+        /* Since ref count > 0, don't free anyone else. */
+        if (ref > 0)
             break;
     }
 }
@@ -784,14 +907,14 @@ BIO *BIO_dup_chain(BIO *in)
         /* This will let SSL_s_sock() work with stdin/stdout */
         new_bio->num = bio->num;
 
-        if (!BIO_dup_state(bio, (char *)new_bio)) {
+        if (BIO_dup_state(bio, (char *)new_bio) <= 0) {
             BIO_free(new_bio);
             goto err;
         }
 
         /* copy app data */
         if (!CRYPTO_dup_ex_data(CRYPTO_EX_INDEX_BIO, &new_bio->ex_data,
-                                &bio->ex_data)) {
+                &bio->ex_data)) {
             BIO_free(new_bio);
             goto err;
         }
@@ -805,7 +928,7 @@ BIO *BIO_dup_chain(BIO *in)
         }
     }
     return ret;
- err:
+err:
     BIO_free_all(ret);
 
     return NULL;
@@ -853,11 +976,10 @@ void bio_cleanup(void)
     CRYPTO_THREAD_lock_free(bio_lookup_lock);
     bio_lookup_lock = NULL;
 #endif
-    CRYPTO_THREAD_lock_free(bio_type_lock);
-    bio_type_lock = NULL;
+    CRYPTO_FREE_REF(&bio_type_count);
 }
 
-/* Internal variant of the below BIO_wait() not calling BIOerr() */
+/* Internal variant of the below BIO_wait() not calling ERR_raise(...) */
 static int bio_wait(BIO *bio, time_t max_time, unsigned int nap_milliseconds)
 {
 #ifndef OPENSSL_NO_SOCK
@@ -869,8 +991,12 @@ static int bio_wait(BIO *bio, time_t max_time, unsigned int nap_milliseconds)
         return 1;
 
 #ifndef OPENSSL_NO_SOCK
-    if (BIO_get_fd(bio, &fd) > 0 && fd < FD_SETSIZE)
-        return BIO_socket_wait(fd, BIO_should_read(bio), max_time);
+    if (BIO_get_fd(bio, &fd) > 0) {
+        int ret = BIO_socket_wait(fd, BIO_should_read(bio), max_time);
+
+        if (ret != -1)
+            return ret;
+    }
 #endif
     /* fall back to polling since no sockets are available */
 
@@ -886,7 +1012,7 @@ static int bio_wait(BIO *bio, time_t max_time, unsigned int nap_milliseconds)
         if ((unsigned long)sec_diff * 1000 < nap_milliseconds)
             nap_milliseconds = (unsigned int)sec_diff * 1000;
     }
-    ossl_sleep(nap_milliseconds);
+    OSSL_sleep(nap_milliseconds);
     return 1;
 }
 
@@ -895,7 +1021,7 @@ static int bio_wait(BIO *bio, time_t max_time, unsigned int nap_milliseconds)
  * Succeed immediately if max_time == 0.
  * If sockets are not available support polling: succeed after waiting at most
  * the number of nap_milliseconds in order to avoid a tight busy loop.
- * Call BIOerr(...) on timeout or error.
+ * Call ERR_raise(ERR_LIB_BIO, ...) on timeout or error.
  * Returns -1 on error, 0 on timeout, and 1 on success.
  */
 int BIO_wait(BIO *bio, time_t max_time, unsigned int nap_milliseconds)
@@ -904,7 +1030,7 @@ int BIO_wait(BIO *bio, time_t max_time, unsigned int nap_milliseconds)
 
     if (rv <= 0)
         ERR_raise(ERR_LIB_BIO,
-                  rv == 0 ? BIO_R_TRANSFER_TIMEOUT : BIO_R_TRANSFER_ERROR);
+            rv == 0 ? BIO_R_TRANSFER_TIMEOUT : BIO_R_TRANSFER_ERROR);
     return rv;
 }
 
@@ -931,7 +1057,7 @@ int BIO_do_connect_retry(BIO *bio, int timeout, int nap_milliseconds)
         nap_milliseconds = 100;
     BIO_set_nbio(bio, !blocking);
 
- retry:
+retry:
     ERR_set_mark();
     rv = BIO_do_connect(bio);
 
@@ -966,7 +1092,7 @@ int BIO_do_connect_retry(BIO *bio, int timeout, int nap_milliseconds)
             if (rv > 0)
                 goto retry;
             ERR_raise(ERR_LIB_BIO,
-                      rv == 0 ? BIO_R_CONNECT_TIMEOUT : BIO_R_CONNECT_ERROR);
+                rv == 0 ? BIO_R_CONNECT_TIMEOUT : BIO_R_CONNECT_ERROR);
         } else {
             ERR_clear_last_mark();
             rv = -1;
@@ -980,3 +1106,18 @@ int BIO_do_connect_retry(BIO *bio, int timeout, int nap_milliseconds)
 
     return rv;
 }
+
+#ifndef OPENSSL_NO_SOCK
+
+int BIO_err_is_non_fatal(unsigned int errcode)
+{
+    if (ERR_SYSTEM_ERROR(errcode))
+        return BIO_sock_non_fatal_error(ERR_GET_REASON(errcode));
+    else if (ERR_GET_LIB(errcode) == ERR_LIB_BIO
+        && ERR_GET_REASON(errcode) == BIO_R_NON_FATAL)
+        return 1;
+    else
+        return 0;
+}
+
+#endif

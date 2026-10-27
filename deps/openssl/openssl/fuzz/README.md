@@ -29,8 +29,36 @@ to the `libFuzzer` library file while configuring; this is represented as
             -fsanitize=fuzzer-no-link \
             enable-ec_nistp_64_gcc_128 -fno-sanitize=alignment \
             enable-weak-ssl-ciphers enable-rc5 enable-md2 \
-            enable-ssl3 enable-ssl3-method enable-nextprotoneg \
+            enable-nextprotoneg \
             --debug
+
+Clang uses the gcc libstdc++ library so this must also be installed. You can
+check which version of gcc clang is using like this:
+
+    $ clang --verbose
+    Ubuntu clang version 14.0.0-1ubuntu1.1
+    Target: x86_64-pc-linux-gnu
+    Thread model: posix
+    InstalledDir: /usr/bin
+    Found candidate GCC installation: /usr/bin/../lib/gcc/i686-linux-gnu/12
+    Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/10
+    Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/11
+    Found candidate GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/12
+    Selected GCC installation: /usr/bin/../lib/gcc/x86_64-linux-gnu/12
+    Candidate multilib: .;@m64
+    Selected multilib: .;@m64
+
+So, in the above example clang is using gcc version 12. Ensure that the selected
+gcc version has the relevant libstdc++ files installed:
+
+    $ ls /usr/lib/gcc/x86_64-linux-gnu/12 | grep stdc++
+    libstdc++.a
+    libstdc++fs.a
+    libstdc++.so
+
+On Ubuntu for gcc-12 this requires the libstdc++-12-dev package installed.
+
+    $ sudo apt-get install libstdc++-12-dev
 
 Compile:
 
@@ -67,8 +95,7 @@ prebuilt fuzzer library. This is represented as `$PATH_TO_LIBFUZZER_DIR` below.
             -fsanitize=fuzzer-no-link \
             enable-ec_nistp_64_gcc_128 -fno-sanitize=alignment \
             enable-weak-ssl-ciphers enable-rc5 enable-md2 \
-            enable-ssl3 enable-ssl3-method enable-nextprotoneg \
-            --debug
+            enable-nextprotoneg --debug
 
 AFL
 ---
@@ -80,9 +107,8 @@ Configure for fuzzing:
     sudo apt-get install afl-clang
     CC=afl-clang-fast ./config enable-fuzz-afl no-shared no-module \
         -DPEDANTIC enable-tls1_3 enable-weak-ssl-ciphers enable-rc5 \
-        enable-md2 enable-ssl3 enable-ssl3-method enable-nextprotoneg \
-        enable-ec_nistp_64_gcc_128 -fno-sanitize=alignment \
-        --debug
+        enable-md2 enable-nextprotoneg enable-ec_nistp_64_gcc_128 \
+        -fno-sanitize=alignment --debug
     make clean
     make
 

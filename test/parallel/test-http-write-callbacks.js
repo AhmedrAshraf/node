@@ -47,7 +47,7 @@ const server = http.createServer((req, res) => {
   res.end('Bad Request.\nMust send Expect:100-continue\n');
 });
 
-server.on('checkContinue', (req, res) => {
+server.on('checkContinue', common.mustCall((req, res) => {
   server.close();
   assert.strictEqual(req.method, 'PUT');
   res.writeContinue(() => {
@@ -67,10 +67,11 @@ server.on('checkContinue', (req, res) => {
   req.on('data', (c) => {
     serverIncoming += c;
   });
-});
+}));
 
-server.listen(0, function() {
+server.listen(0, common.mustCall(function() {
   const req = http.request({
+    agent: false,
     port: this.address().port,
     method: 'PUT',
     headers: { 'expect': '100-continue' }
@@ -85,12 +86,12 @@ server.listen(0, function() {
       }));
     }));
   });
-  req.on('response', (res) => {
+  req.on('response', common.mustCall((res) => {
     // This should not come until after the end is flushed out
     assert(clientEndCb);
     res.setEncoding('ascii');
     res.on('data', (c) => {
       clientIncoming += c;
     });
-  });
-});
+  }));
+}));

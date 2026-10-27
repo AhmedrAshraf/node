@@ -57,7 +57,8 @@ struct Argv {
 
 using ArrayBufferUniquePtr = std::unique_ptr<node::ArrayBufferAllocator,
       decltype(&node::FreeArrayBufferAllocator)>;
-using TracingAgentUniquePtr = std::unique_ptr<node::tracing::Agent>;
+using TracingAgentUniquePtr =
+    std::unique_ptr<node::tracing::Agent, node::tracing::Agent::Deleter>;
 using NodePlatformUniquePtr = std::unique_ptr<node::NodePlatform>;
 
 class NodeTestEnvironment final : public ::testing::Environment {
@@ -67,6 +68,7 @@ class NodeTestEnvironment final : public ::testing::Environment {
   void TearDown() override;
 };
 
+class NodeTestFixture;
 
 class NodeZeroIsolateTestFixture : public ::testing::Test {
  protected:
@@ -80,13 +82,15 @@ class NodeZeroIsolateTestFixture : public ::testing::Test {
     if (!node_initialized) {
       node_initialized = true;
       uv_os_unsetenv("NODE_OPTIONS");
-      std::vector<std::string> argv { "cctest" };
-      std::vector<std::string> exec_argv;
-      std::vector<std::string> errors;
+      std::vector<std::string> argv{"cctest"};
 
-      int exitcode = node::InitializeNodeWithArgs(&argv, &exec_argv, &errors);
-      CHECK_EQ(exitcode, 0);
-      CHECK(errors.empty());
+      std::shared_ptr<node::InitializationResult> result =
+          node::InitializeOncePerProcess(
+              argv,
+              node::ProcessInitializationFlags::
+                  kLegacyInitializeNodeWithArgsBehavior);
+      CHECK_EQ(result->exit_code(), 0);
+      CHECK(result->errors().empty());
     }
     CHECK_EQ(0, uv_loop_init(&current_loop));
   }
@@ -104,12 +108,13 @@ class NodeZeroIsolateTestFixture : public ::testing::Test {
   }
 
   friend NodeTestEnvironment;
+  friend NodeTestFixture;
 };
 
 
 class NodeTestFixture : public NodeZeroIsolateTestFixture {
  protected:
-  v8::Isolate* isolate_;
+  static v8::Isolate* isolate_;
 
   void SetUp() override {
     NodeZeroIsolateTestFixture::SetUp();
@@ -121,8 +126,7 @@ class NodeTestFixture : public NodeZeroIsolateTestFixture {
   void TearDown() override {
     platform->DrainTasks(isolate_);
     isolate_->Exit();
-    platform->UnregisterIsolate(isolate_);
-    isolate_->Dispose();
+    platform->DisposeIsolate(isolate_);
     isolate_ = nullptr;
     NodeZeroIsolateTestFixture::TearDown();
   }
@@ -130,7 +134,22 @@ class NodeTestFixture : public NodeZeroIsolateTestFixture {
 
 
 class EnvironmentTestFixture : public NodeTestFixture {
- public:
+ protected:
+  static node::IsolateData* isolate_data_;
+
+  void SetUp() override {
+    NodeTestFixture::SetUp();
+    isolate_data_ = node::CreateIsolateData(NodeTestFixture::isolate_,
+                                            &NodeTestFixture::current_loop,
+                                            platform.get());
+    CHECK_NE(nullptr, isolate_data_);
+  }
+
+  void TearDown() override {
+    node::FreeIsolateData(isolate_data_);
+    NodeTestFixture::TearDown();
+  }
+
   class Env {
    public:
     Env(const v8::HandleScope& handle_scope,
@@ -142,23 +161,20 @@ class EnvironmentTestFixture : public NodeTestFixture {
       CHECK(!context_.IsEmpty());
       context_->Enter();
 
-      isolate_data_ = node::CreateIsolateData(isolate,
-                                              &NodeTestFixture::current_loop,
-                                              platform.get());
-      CHECK_NE(nullptr, isolate_data_);
       std::vector<std::string> args(*argv, *argv + 1);
       std::vector<std::string> exec_args(*argv, *argv + 1);
-      environment_ = node::CreateEnvironment(isolate_data_,
-                                             context_,
-                                             args,
-                                             exec_args,
-                                             flags);
+      DCHECK_EQ(EnvironmentTestFixture::isolate_data_->isolate(), isolate);
+      environment_ =
+          node::CreateEnvironment(EnvironmentTestFixture::isolate_data_,
+                                  context_,
+                                  args,
+                                  exec_args,
+                                  flags);
       CHECK_NE(nullptr, environment_);
     }
 
     ~Env() {
       node::FreeEnvironment(environment_);
-      node::FreeIsolateData(isolate_data_);
       context_->Exit();
     }
 
@@ -175,7 +191,6 @@ class EnvironmentTestFixture : public NodeTestFixture {
 
    private:
     v8::Local<v8::Context> context_;
-    node::IsolateData* isolate_data_;
     node::Environment* environment_;
   };
 };

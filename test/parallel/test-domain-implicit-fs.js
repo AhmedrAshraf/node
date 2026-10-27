@@ -1,3 +1,5 @@
+// Flags: --no-deprecation
+
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -49,14 +51,15 @@ d.on('error', common.mustCall(function(er) {
 // Everything that happens between the domain.enter() and domain.exit()
 // calls will be bound to the domain, even if multiple levels of
 // handles are created.
-d.run(function() {
-  setTimeout(function() {
+d.run(common.mustCall(() => {
+  setTimeout(common.mustCall(() => {
     const fs = require('fs');
-    fs.readdir(__dirname, function() {
-      fs.open('this file does not exist', 'r', function(er) {
+    fs.readdir(__dirname, common.mustCall(() => {
+      // eslint-disable-next-line node-core/prefer-common-mustsucceed
+      fs.open('this file does not exist', 'r', common.mustCall((er) => {
         assert.ifError(er);
         throw new Error('should not get here!');
-      });
-    });
-  }, 100);
-});
+      }));
+    }));
+  }), 100);
+}));

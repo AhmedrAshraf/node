@@ -19,9 +19,10 @@
 namespace node {
 namespace report {
 // Function declarations - utility functions in src/node_report_utils.cc
-void WalkHandle(uv_handle_t* h, void* arg);
+void WalkHandleNetwork(uv_handle_t* h, void* arg);
+void WalkHandleNoNetwork(uv_handle_t* h, void* arg);
 
-template <typename T>
+template <std::integral T>
 std::string ValueToHexString(T value) {
   std::stringstream hex;
 

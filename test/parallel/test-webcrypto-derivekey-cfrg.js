@@ -6,8 +6,9 @@ if (!common.hasCrypto)
   common.skip('missing crypto');
 
 const assert = require('assert');
-const { webcrypto } = require('crypto');
-const { subtle } = webcrypto;
+const { hasFIPS, isBoringSSL } = require('../common/crypto');
+const { subtle } = globalThis.crypto;
+const rejectsXCurves = hasFIPS(3, 5);
 
 const kTests = [
   {
@@ -19,27 +20,31 @@ const kTests = [
           '64ea51fae5b3307cfe9706',
     result: '2768409dfab99ec23b8c89b93ff5880295f76176088f89e43dfebe7ea1950008'
   },
-  {
-    name: 'X448',
-    size: 56,
-    pkcs8: '3046020100300506032b656f043a043858c7d29a3eb519b29d00cfb191bb64fc6' +
+];
+
+if (!isBoringSSL) {
+  kTests.push(
+    {
+      name: 'X448',
+      size: 56,
+      pkcs8: '3046020100300506032b656f043a043858c7d29a3eb519b29d00cfb191bb64fc6' +
            'd8a42d8f17176272b89f2272d1819295c6525c0829671b052ef0727530f188e31' +
            'd0cc53bf26929e',
-    spki: '3042300506032b656f033900b604a1d1a5cd1d9426d561ef630a9eb16cbe69d5b9' +
+      spki: '3042300506032b656f033900b604a1d1a5cd1d9426d561ef630a9eb16cbe69d5b9' +
           'ca615edc53633efb52ea31e6e6a0a1dbacc6e76cbce6482d7e4ba3d55d9e802765' +
           'ce6f',
-    result: 'f0f6c5f17f94f4291eab7178866d37ec8906dd6c514143dc85be7cf28deff39b'
-  },
-];
+      result: 'f0f6c5f17f94f4291eab7178866d37ec8906dd6c514143dc85be7cf28deff39b'
+    },
+  );
+} else {
+  common.printSkipMessage('Skipping unsupported X448 test case');
+}
 
 async function prepareKeys() {
   const keys = {};
   await Promise.all(
     kTests.map(async ({ name, size, pkcs8, spki, result }) => {
-      const [
-        privateKey,
-        publicKey,
-      ] = await Promise.all([
+      const imported = [
         subtle.importKey(
           'pkcs8',
           Buffer.from(pkcs8, 'hex'),
@@ -52,7 +57,14 @@ async function prepareKeys() {
           { name },
           true,
           []),
-      ]);
+      ];
+      if (rejectsXCurves) {
+        await Promise.all(imported.map((promise) => assert.rejects(promise, {
+          name: 'NotSupportedError', message: 'Unrecognized algorithm name',
+        })));
+        return;
+      }
+      const [privateKey, publicKey] = await Promise.all(imported);
       keys[name] = {
         privateKey,
         publicKey,
@@ -65,6 +77,7 @@ async function prepareKeys() {
 
 (async function() {
   const keys = await prepareKeys();
+  if (rejectsXCurves) return;
   const otherArgs = [
     { name: 'HMAC', hash: 'SHA-256', length: 256 },
     true,
@@ -108,10 +121,10 @@ async function prepareKeys() {
     // Missing public property
     await assert.rejects(
       subtle.deriveKey(
-        { name: 'X448' },
-        keys.X448.privateKey,
+        { name: 'X25519' },
+        keys.X25519.privateKey,
         ...otherArgs),
-      { code: 'ERR_INVALID_ARG_TYPE' });
+      { code: 'ERR_MISSING_OPTION' });
   }
 
   {
@@ -119,15 +132,15 @@ async function prepareKeys() {
     await assert.rejects(
       subtle.deriveKey(
         {
-          name: 'X448',
+          name: 'X25519',
           public: { message: 'Not a CryptoKey' }
         },
-        keys.X448.privateKey,
+        keys.X25519.privateKey,
         ...otherArgs),
       { code: 'ERR_INVALID_ARG_TYPE' });
   }
 
-  {
+  if (keys.X25519 && keys.X448) {
     // Mismatched named curves
     await assert.rejects(
       subtle.deriveKey(
@@ -137,7 +150,7 @@ async function prepareKeys() {
         },
         keys.X448.privateKey,
         ...otherArgs),
-      { message: 'The public and private keys must be of the same type' });
+      { message: 'key algorithm mismatch' });
   }
 
   {
@@ -145,10 +158,10 @@ async function prepareKeys() {
     await assert.rejects(
       subtle.deriveKey(
         {
-          name: 'X448',
-          public: keys.X448.publicKey
+          name: 'X25519',
+          public: keys.X25519.publicKey
         },
-        keys.X448.publicKey,
+        keys.X25519.publicKey,
         ...otherArgs),
       { name: 'InvalidAccessError' });
   }
@@ -158,17 +171,17 @@ async function prepareKeys() {
     await assert.rejects(
       subtle.deriveKey(
         {
-          name: 'X448',
-          public: keys.X448.privateKey
+          name: 'X25519',
+          public: keys.X25519.privateKey
         },
-        keys.X448.privateKey,
+        keys.X25519.privateKey,
         ...otherArgs),
       { name: 'InvalidAccessError' });
   }
 
   {
     // Public is a secret key
-    const keyData = webcrypto.getRandomValues(new Uint8Array(32));
+    const keyData = globalThis.crypto.getRandomValues(new Uint8Array(32));
     const key = await subtle.importKey(
       'raw',
       keyData,
@@ -178,10 +191,10 @@ async function prepareKeys() {
     await assert.rejects(
       subtle.deriveKey(
         {
-          name: 'X448',
+          name: 'X25519',
           public: key
         },
-        keys.X448.publicKey,
+        keys.X25519.publicKey,
         ...otherArgs),
       { name: 'InvalidAccessError' });
   }

@@ -1,4 +1,4 @@
-#include "s390x_arch.h"
+#include "arch/s390x_arch.h"
 
 .text
 
@@ -1614,6 +1614,9 @@ AES_ctr32_encrypt:
 	stg	%r11,0(%r15)			# backchain
 	la	%r1,160(%r15)
 
+	xc	160+0(64,%r15),160+0(%r15)	# clear reserved/unused
+							# in parameter block
+
 	lmg	%r10,%r11,0(%r5)			# copy key
 	stg	%r10,160+80(%r15)
 	stg	%r11,160+88(%r15)
@@ -2362,4 +2365,4 @@ AES_xts_decrypt:
 	lmg	%r6,%r14,6*8(%r15)
 	br	%r14
 .size	AES_xts_decrypt,.-AES_xts_decrypt
-.string	"AES for s390x, CRYPTOGAMS by <appro@openssl.org>"
+.string	"AES for s390x, CRYPTOGAMS by <https://github.com/dot-asm>"

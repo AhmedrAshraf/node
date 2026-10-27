@@ -1,8 +1,9 @@
 #include <assert.h>
 #include <node.h>
 
-#include <openssl/opensslv.h>
-#if OPENSSL_VERSION_MAJOR >= 3
+// BoringSSL declares OPENSSL_IS_BORINGSSL in crypto.h.
+#include <openssl/crypto.h>
+#ifndef OPENSSL_IS_BORINGSSL
 #include <openssl/provider.h>
 #endif
 
@@ -13,11 +14,12 @@ using v8::Context;
 using v8::FunctionCallbackInfo;
 using v8::Isolate;
 using v8::Local;
+using v8::LocalVector;
 using v8::Object;
 using v8::String;
 using v8::Value;
 
-#if OPENSSL_VERSION_MAJOR >= 3
+#ifndef OPENSSL_IS_BORINGSSL
 int collectProviders(OSSL_PROVIDER* provider, void* cbdata) {
   static_cast<std::vector<OSSL_PROVIDER*>*>(cbdata)->push_back(provider);
   return 1;
@@ -26,8 +28,8 @@ int collectProviders(OSSL_PROVIDER* provider, void* cbdata) {
 
 inline void GetProviders(const FunctionCallbackInfo<Value>& args) {
   Isolate* isolate = args.GetIsolate();
-  std::vector<Local<Value>> arr = {};
-#if OPENSSL_VERSION_MAJOR >= 3
+  LocalVector<Value> arr(isolate, 0);
+#ifndef OPENSSL_IS_BORINGSSL
   std::vector<OSSL_PROVIDER*> providers;
   OSSL_PROVIDER_do_all(nullptr, &collectProviders, &providers);
   for (auto provider : providers) {

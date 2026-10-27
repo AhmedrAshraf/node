@@ -38,12 +38,18 @@ const addresses = {
   CNAME_HOST: 'blog.nodejs.org',
   // A host with NS records registered
   NS_HOST: 'nodejs.org',
+  // A host with TLSA records registered
+  TLSA_HOST: '_443._tcp.fedoraproject.org',
   // A host with TXT records registered
   TXT_HOST: 'nodejs.org',
   // An accessible IPv4 DNS server
   DNS4_SERVER: '8.8.8.8',
   // An accessible IPv4 DNS server
   DNS6_SERVER: '2001:4860:4860::8888',
+  // A valid host with no records (except SOA)
+  NO_RECORD_HOST: 'void.example.com',
+  // A valid host with no TXT records, and a CNAME to a host with no TXT records
+  CNAME_TO_NO_TXT_HOST: 'www.microsoft.com',
 };
 
 for (const key of Object.keys(addresses)) {

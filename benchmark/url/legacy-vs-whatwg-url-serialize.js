@@ -7,7 +7,11 @@ const assert = require('assert');
 const bench = common.createBenchmark(main, {
   type: common.urlDataTypes,
   method: ['legacy', 'whatwg'],
-  e: [1]
+  e: [1],
+}, {
+  test: {
+    type: 'short',
+  },
 });
 
 function useLegacy(data) {

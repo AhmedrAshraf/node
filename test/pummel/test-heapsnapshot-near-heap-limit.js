@@ -2,7 +2,7 @@
 
 const common = require('../common');
 
-if (common.isPi) {
+if (common.isPi()) {
   common.skip('Too slow for Raspberry Pi devices');
 }
 
@@ -13,7 +13,7 @@ const fixtures = require('../common/fixtures');
 const fs = require('fs');
 const env = {
   ...process.env,
-  NODE_DEBUG_NATIVE: 'diagnostics'
+  NODE_DEBUG_NATIVE: 'diagnostics',
 };
 
 {

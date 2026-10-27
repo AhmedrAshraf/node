@@ -27,9 +27,7 @@
 #include <string.h>
 #include <assert.h>
 
-void nghttp2_queue_init(nghttp2_queue *queue) {
-  queue->front = queue->back = NULL;
-}
+void nghttp2_queue_init(nghttp2_queue *queue) { *queue = (nghttp2_queue){0}; }
 
 void nghttp2_queue_free(nghttp2_queue *queue) {
   if (!queue) {
@@ -46,12 +44,13 @@ void nghttp2_queue_free(nghttp2_queue *queue) {
 
 int nghttp2_queue_push(nghttp2_queue *queue, void *data) {
   nghttp2_queue_cell *new_cell =
-      (nghttp2_queue_cell *)malloc(sizeof(nghttp2_queue_cell));
+    (nghttp2_queue_cell *)malloc(sizeof(nghttp2_queue_cell));
   if (!new_cell) {
     return NGHTTP2_ERR_NOMEM;
   }
-  new_cell->data = data;
-  new_cell->next = NULL;
+  *new_cell = (nghttp2_queue_cell){
+    .data = data,
+  };
   if (queue->back) {
     queue->back->next = new_cell;
     queue->back = new_cell;

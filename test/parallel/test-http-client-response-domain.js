@@ -36,11 +36,11 @@ const server = http.createServer(function(req, res) {
   res.end();
   server.close();
 });
-server.listen(common.PIPE, function() {
+server.listen(common.PIPE, common.mustCall(() => {
   // create a domain
   d = domain.create();
   d.run(common.mustCall(test));
-});
+}));
 
 function test() {
 
@@ -49,6 +49,7 @@ function test() {
   }));
 
   const req = http.get({
+    agent: false,
     socketPath: common.PIPE,
     headers: { 'Content-Length': '1' },
     method: 'POST',

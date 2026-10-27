@@ -19,6 +19,8 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+// Flags: --no-deprecation
+
 'use strict';
 // Tests of multiple domains happening at once.
 
@@ -33,7 +35,7 @@ a.enter(); // This will be our "root" domain
 
 a.on('error', common.mustNotCall());
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(common.mustCallAtLeast((req, res) => {
   // child domain of a.
   const b = domain.create();
   a.add(b);
@@ -61,7 +63,7 @@ const server = http.createServer((req, res) => {
     throw new Error('this kills domain B, not A');
   }));
 
-}).listen(0, () => {
+})).listen(0, common.mustCall(() => {
   const c = domain.create();
   const req = http.get({ host: 'localhost', port: server.address().port });
 
@@ -75,4 +77,4 @@ const server = http.createServer((req, res) => {
   });
 
   c.on('error', common.mustCall());
-});
+}));

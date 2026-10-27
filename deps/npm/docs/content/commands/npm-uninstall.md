@@ -14,26 +14,19 @@ aliases: unlink, remove, rm, r, un
 
 ### Description
 
-This uninstalls a package, completely removing everything npm installed
-on its behalf.
+This uninstalls a package, completely removing everything npm installed on its behalf.
 
 It also removes the package from the `dependencies`, `devDependencies`,
-`optionalDependencies`, and `peerDependencies` objects in your
-`package.json`.
+`optionalDependencies`, and `peerDependencies` objects in your `package.json`.
 
-Further, if you have an `npm-shrinkwrap.json` or `package-lock.json`, npm
-will update those files as well.
+Further, if you have a `package-lock.json`, npm will update that file as well.
 
-`--no-save` will tell npm not to remove the package from your
-`package.json`, `npm-shrinkwrap.json`, or `package-lock.json` files.
+`--no-save` will tell npm not to remove the package from your `package.json` or `package-lock.json` files.
 
-`--save` or `-S` will tell npm to remove the package from your
-`package.json`, `npm-shrinkwrap.json`, and `package-lock.json` files.
-This is the default, but you may need to use this if you have for
-instance `save=false` in your `npmrc` file
+`--save` or `-S` will tell npm to remove the package from your `package.json` and `package-lock.json` files.
+This is the default, but you may need to use this if you have for instance `save=false` in your `npmrc` file
 
-In global mode (ie, with `-g` or `--global` appended to the command),
-it uninstalls the current package context as a global package.
+In global mode (ie, with `-g` or `--global` appended to the command), it uninstalls the current package context as a global package.
 `--no-save` is ignored in this case.
 
 Scope is optional and follows the usual rules for [`scope`](/using-npm/scope).
@@ -44,15 +37,14 @@ Scope is optional and follows the usual rules for [`scope`](/using-npm/scope).
 npm uninstall sax
 ```
 
-`sax` will no longer be in your `package.json`, `npm-shrinkwrap.json`, or
-`package-lock.json` files.
+`sax` will no longer be in your `package.json` or `package-lock.json` files.
 
 ```bash
 npm uninstall lodash --no-save
 ```
 
-`lodash` will not be removed from your `package.json`,
-`npm-shrinkwrap.json`, or `package-lock.json` files.
+`lodash` will not be removed from your `package.json` or
+`package-lock.json` files.
 
 ### Configuration
 
@@ -67,6 +59,24 @@ When used with the `npm rm` command, removes the dependency from
 `package.json`.
 
 Will also prevent writing to `package-lock.json` if set to `false`.
+
+
+
+#### `global`
+
+* Default: false
+* Type: Boolean
+
+Operates in "global" mode, so that packages are installed into the `prefix`
+folder instead of the current working directory. See
+[folders](/configuring-npm/folders) for more on the differences in behavior.
+
+* packages are installed into the `{prefix}/lib/node_modules` folder, instead
+  of the current working directory.
+* bin files are linked to `{prefix}/bin`
+* man pages are linked to `{prefix}/share/man`
+
+
 
 #### `workspace`
 
@@ -126,9 +136,11 @@ This value is not exported to the environment for child processes.
 * Default: false
 * Type: Boolean
 
-When set file: protocol dependencies that exist outside of the project root
-will be packed and installed as regular dependencies instead of creating a
-symlink. This option has no effect on workspaces.
+When set file: protocol dependencies will be packed and installed as regular
+dependencies instead of creating a symlink. This option has no effect on
+workspaces.
+
+
 
 ### See Also
 

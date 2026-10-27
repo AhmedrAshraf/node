@@ -1,6 +1,11 @@
 'use strict';
 
 const common = require('../common');
+
+if (common.isInsideDirWithUnusualChars) {
+  common.skip('expected failure');
+}
+
 const assert = require('node:assert');
 const { spawnSync, spawn } = require('node:child_process');
 
@@ -42,7 +47,15 @@ const allRegExpStatics =
 
 {
   const child = spawnSync(process.execPath,
-                          [ '-e', `console.log(${allRegExpStatics})`, '--input-type=module' ],
+                          [ '--expose-internals', '-p', `const {
+                            SideEffectFreeRegExpPrototypeExec,
+                            SideEffectFreeRegExpPrototypeSymbolReplace,
+                            SideEffectFreeRegExpPrototypeSymbolSplit,
+                          } = require("internal/util");
+                          SideEffectFreeRegExpPrototypeExec(/foo/, "foo");
+                          SideEffectFreeRegExpPrototypeSymbolReplace(/o/, "foo", "a");
+                          SideEffectFreeRegExpPrototypeSymbolSplit(/o/, "foo");
+                          ${allRegExpStatics}` ],
                           { stdio: ['inherit', 'pipe', 'inherit'] });
   assert.match(child.stdout.toString(), /^undefined\r?\n$/);
   assert.strictEqual(child.status, 0);
@@ -50,6 +63,15 @@ const allRegExpStatics =
 }
 
 {
+  const child = spawnSync(process.execPath,
+                          [ '-e', `console.log(${allRegExpStatics})`, '--input-type=module' ],
+                          { stdio: ['inherit', 'pipe', 'inherit'] });
+  assert.match(child.stdout.toString(), /^undefined\r?\n$/);
+  assert.strictEqual(child.status, 0);
+  assert.strictEqual(child.signal, null);
+}
+
+if (!common.isInsideDirWithUnusualChars) {
   const child = spawn(process.execPath, [], { stdio: ['pipe', 'pipe', 'inherit'], encoding: 'utf8' });
 
   let stdout = '';

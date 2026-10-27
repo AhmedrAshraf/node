@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -23,7 +23,7 @@ static int linebuffer_free(BIO *data);
 static long linebuffer_callback_ctrl(BIO *h, int cmd, BIO_info_cb *fp);
 
 /* A 10k maximum should be enough for most purposes */
-#define DEFAULT_LINEBUFFER_SIZE 1024*10
+#define DEFAULT_LINEBUFFER_SIZE 1024 * 10
 
 /* #define DEBUG */
 
@@ -48,22 +48,19 @@ const BIO_METHOD *BIO_f_linebuffer(void)
 }
 
 typedef struct bio_linebuffer_ctx_struct {
-    char *obuf;                 /* the output char array */
-    int obuf_size;              /* how big is the output buffer */
-    int obuf_len;               /* how many bytes are in it */
+    char *obuf; /* the output char array */
+    int obuf_size; /* how big is the output buffer */
+    int obuf_len; /* how many bytes are in it */
 } BIO_LINEBUFFER_CTX;
 
 static int linebuffer_new(BIO *bi)
 {
     BIO_LINEBUFFER_CTX *ctx;
 
-    if ((ctx = OPENSSL_malloc(sizeof(*ctx))) == NULL) {
-        ERR_raise(ERR_LIB_BIO, ERR_R_MALLOC_FAILURE);
+    if ((ctx = OPENSSL_malloc(sizeof(*ctx))) == NULL)
         return 0;
-    }
     ctx->obuf = OPENSSL_malloc(DEFAULT_LINEBUFFER_SIZE);
     if (ctx->obuf == NULL) {
-        ERR_raise(ERR_LIB_BIO, ERR_R_MALLOC_FAILURE);
         OPENSSL_free(ctx);
         return 0;
     }
@@ -122,7 +119,8 @@ static int linebuffer_write(BIO *b, const char *in, int inl)
         const char *p;
         char c;
 
-        for (p = in, c = '\0'; p < in + inl && (c = *p) != '\n'; p++) ;
+        for (p = in, c = '\0'; p < in + inl && (c = *p) != '\n'; p++)
+            ;
         if (c == '\n') {
             p++;
             foundnl = 1;
@@ -134,16 +132,17 @@ static int linebuffer_write(BIO *b, const char *in, int inl)
          * concatenate them and write
          */
         while ((foundnl || p - in > ctx->obuf_size - ctx->obuf_len)
-               && ctx->obuf_len > 0) {
+            && ctx->obuf_len > 0) {
             int orig_olen = ctx->obuf_len;
+            int llen = (int)(p - in);
 
             i = ctx->obuf_size - ctx->obuf_len;
-            if (p - in > 0) {
-                if (i >= p - in) {
-                    memcpy(&(ctx->obuf[ctx->obuf_len]), in, p - in);
-                    ctx->obuf_len += p - in;
-                    inl -= p - in;
-                    num += p - in;
+            if (llen > 0) {
+                if (i >= llen) {
+                    memcpy(&(ctx->obuf[ctx->obuf_len]), in, llen);
+                    ctx->obuf_len += llen;
+                    inl -= llen;
+                    num += llen;
                     in = p;
                 } else {
                     memcpy(&(ctx->obuf[ctx->obuf_len]), in, i);
@@ -173,7 +172,7 @@ static int linebuffer_write(BIO *b, const char *in, int inl)
          * if a NL was found and there is anything to write.
          */
         if ((foundnl || p - in > ctx->obuf_size) && p - in > 0) {
-            i = BIO_write(b->next_bio, in, p - in);
+            i = BIO_write(b->next_bio, in, (int)(p - in));
             if (i <= 0) {
                 BIO_copy_next_retry(b);
                 if (i < 0)
@@ -185,18 +184,37 @@ static int linebuffer_write(BIO *b, const char *in, int inl)
             in += i;
             inl -= i;
         }
-    }
-    while (foundnl && inl > 0);
+    } while (foundnl && inl > 0);
     /*
      * We've written as much as we can.  The rest of the input buffer, if
-     * any, is text that doesn't and with a NL and therefore needs to be
-     * saved for the next trip.
+     * any, is text that doesn't end with a NL and therefore we need to try
+     * free up some space in our obuf so we can make forward progress.
      */
-    if (inl > 0) {
-        memcpy(&(ctx->obuf[ctx->obuf_len]), in, inl);
-        ctx->obuf_len += inl;
-        num += inl;
+    while (inl > 0) {
+        size_t avail = (size_t)ctx->obuf_size - (size_t)ctx->obuf_len;
+        size_t to_copy;
+
+        if (avail == 0) {
+            /* Flush buffered data to make room */
+            i = BIO_write(b->next_bio, ctx->obuf, ctx->obuf_len);
+            if (i <= 0) {
+                BIO_copy_next_retry(b);
+                return num > 0 ? num : i;
+            }
+            if (i < ctx->obuf_len)
+                memmove(ctx->obuf, ctx->obuf + i, ctx->obuf_len - i);
+            ctx->obuf_len -= i;
+            continue;
+        }
+
+        to_copy = inl > (int)avail ? avail : (size_t)inl;
+        memcpy(&(ctx->obuf[ctx->obuf_len]), in, to_copy);
+        ctx->obuf_len += (int)to_copy;
+        in += to_copy;
+        inl -= (int)to_copy;
+        num += (int)to_copy;
     }
+
     return num;
 }
 
@@ -237,7 +255,7 @@ static long linebuffer_ctrl(BIO *b, int cmd, long num, void *ptr)
         if ((obs > DEFAULT_LINEBUFFER_SIZE) && (obs != ctx->obuf_size)) {
             p = OPENSSL_malloc((size_t)obs);
             if (p == NULL)
-                goto malloc_error;
+                return 0;
         }
         if (ctx->obuf != p) {
             if (ctx->obuf_len > obs) {
@@ -262,6 +280,7 @@ static long linebuffer_ctrl(BIO *b, int cmd, long num, void *ptr)
             return 0;
         if (ctx->obuf_len <= 0) {
             ret = BIO_ctrl(b->next_bio, cmd, num, ptr);
+            BIO_copy_next_retry(b);
             break;
         }
 
@@ -281,11 +300,21 @@ static long linebuffer_ctrl(BIO *b, int cmd, long num, void *ptr)
             }
         }
         ret = BIO_ctrl(b->next_bio, cmd, num, ptr);
+        BIO_copy_next_retry(b);
         break;
     case BIO_CTRL_DUP:
         dbio = (BIO *)ptr;
-        if (!BIO_set_write_buffer_size(dbio, ctx->obuf_size))
+        if (BIO_set_write_buffer_size(dbio, ctx->obuf_size) <= 0)
             ret = 0;
+        break;
+    case BIO_CTRL_EOF:
+        /*
+         * If there is no next BIO, BIO_read() returns 0, which means EOF.
+         * BIO_eof() should return 1 in this case.
+         */
+        if (b->next_bio == NULL)
+            return 1;
+        ret = BIO_ctrl(b->next_bio, cmd, num, ptr);
         break;
     default:
         if (b->next_bio == NULL)
@@ -294,9 +323,6 @@ static long linebuffer_ctrl(BIO *b, int cmd, long num, void *ptr)
         break;
     }
     return ret;
- malloc_error:
-    ERR_raise(ERR_LIB_BIO, ERR_R_MALLOC_FAILURE);
-    return 0;
 }
 
 static long linebuffer_callback_ctrl(BIO *b, int cmd, BIO_info_cb *fp)
@@ -308,12 +334,21 @@ static long linebuffer_callback_ctrl(BIO *b, int cmd, BIO_info_cb *fp)
 
 static int linebuffer_gets(BIO *b, char *buf, int size)
 {
+    int ret = 0;
+
     if (b->next_bio == NULL)
         return 0;
-    return BIO_gets(b->next_bio, buf, size);
+    ret = BIO_gets(b->next_bio, buf, size);
+    BIO_clear_retry_flags(b);
+    BIO_copy_next_retry(b);
+    return ret;
 }
 
 static int linebuffer_puts(BIO *b, const char *str)
 {
-    return linebuffer_write(b, str, strlen(str));
+    size_t len = strlen(str);
+
+    if (len > INT_MAX)
+        return -1;
+    return linebuffer_write(b, str, (int)len);
 }

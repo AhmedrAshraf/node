@@ -6,7 +6,10 @@ if (!common.hasCrypto)
   common.skip('missing crypto');
 
 const assert = require('assert');
-const { subtle } = require('crypto').webcrypto;
+const { hasFIPS, isBoringSSL } = require('../common/crypto');
+const { subtle } = globalThis.crypto;
+const fips3 = hasFIPS(3);
+const rejectsSha1Signing = hasFIPS(3) && !hasFIPS(3, 5);
 
 const rsa_pkcs = require('../fixtures/crypto/rsa_pkcs');
 const rsa_pss = require('../fixtures/crypto/rsa_pss');
@@ -82,12 +85,12 @@ async function testVerify({
   // Test failure when using the wrong algorithms
   await assert.rejects(
     subtle.verify(algorithm, hmacKey, signature, plaintext), {
-      message: /Unable to use this key to verify/
+      message: /Key algorithm mismatch/
     });
 
   await assert.rejects(
     subtle.verify(algorithm, ecdsaKeys.publicKey, signature, plaintext), {
-      message: /Unable to use this key to verify/
+      message: /Key algorithm mismatch/
     });
 
   // Test failure when signature is altered
@@ -112,19 +115,14 @@ async function testVerify({
   // Test failure when wrong hash is used
   {
     const otherhash = hash === 'SHA-1' ? 'SHA-256' : 'SHA-1';
-    assert(!(await subtle.verify({
-      ...algorithm,
-      hash: otherhash
-    }, publicKey, signature, copy)));
+    const keyWithOtherHash = await subtle.importKey(
+      'spki',
+      publicKeyBuffer,
+      { name: algorithm.name, hash: otherhash },
+      false,
+      ['verify']);
+    assert(!(await subtle.verify(algorithm, keyWithOtherHash, signature, plaintext)));
   }
-
-  await assert.rejects(
-    subtle.verify(
-      { ...algorithm, hash: 'sha256' },
-      publicKey,
-      signature,
-      copy),
-    { message: /Unrecognized name/ });
 }
 
 async function testSign({
@@ -137,7 +135,6 @@ async function testSign({
 }) {
   const [
     publicKey,
-    noSignPrivateKey,
     privateKey,
     hmacKey,
     ecdsaKeys,
@@ -148,12 +145,6 @@ async function testSign({
       { name: algorithm.name, hash },
       false,
       ['verify']),
-    subtle.importKey(
-      'pkcs8',
-      privateKeyBuffer,
-      { name: algorithm.name, hash },
-      false,
-      [ /* No usages */ ]),
     subtle.importKey(
       'pkcs8',
       privateKeyBuffer,
@@ -194,35 +185,124 @@ async function testSign({
       message: /Unable to use this key to sign/
     });
 
-  // Test failure when no sign usage
-  await assert.rejects(
-    subtle.sign(algorithm, noSignPrivateKey, plaintext), {
-      message: /Unable to use this key to sign/
-    });
-
   // Test failure when using the wrong algorithms
   await assert.rejects(
     subtle.sign(algorithm, hmacKey, plaintext), {
-      message: /Unable to use this key to sign/
+      message: /Key algorithm mismatch/
     });
 
   await assert.rejects(
     subtle.sign(algorithm, ecdsaKeys.privateKey, plaintext), {
-      message: /Unable to use this key to sign/
+      message: /Key algorithm mismatch/
     });
+}
+
+async function testFipsSignRejected({
+  algorithm,
+  hash,
+  privateKeyBuffer,
+  plaintext,
+}) {
+  const privateKey = await subtle.importKey(
+    'pkcs8',
+    privateKeyBuffer,
+    { name: algorithm.name, hash },
+    false,
+    ['sign']);
+  await assert.rejects(
+    subtle.sign(algorithm, privateKey, plaintext),
+    { name: 'OperationError' });
+}
+
+async function testSaltLength(keyLength, hash, hLen, spki, pkcs8) {
+  const [publicKey, privateKey] = await Promise.all([
+    subtle.importKey('spki', spki, { name: 'RSA-PSS', hash }, false, ['verify']),
+    subtle.importKey('pkcs8', pkcs8, { name: 'RSA-PSS', hash }, false, ['sign']),
+  ]);
+
+  const data = Buffer.from('Hello, world!');
+  const max = keyLength / 8 - hLen - 2;
+
+  const signature = await subtle.sign(
+    { name: 'RSA-PSS', saltLength: max }, privateKey, data);
+  assert.strictEqual(await subtle.verify(
+    { name: 'RSA-PSS', saltLength: max }, publicKey, signature, data), true);
+
+  for (const saltLength of [max + 1, 0x7fffffff]) {
+    await assert.rejects(
+      subtle.sign({ name: 'RSA-PSS', saltLength }, privateKey, data), {
+        name: 'OperationError',
+      });
+    assert.strictEqual(await subtle.verify(
+      { name: 'RSA-PSS', saltLength }, publicKey, signature, data), false);
+  }
+
+  for (const saltLength of [0x80000000, 0xffffffff]) {
+    await assert.rejects(
+      subtle.sign({ name: 'RSA-PSS', saltLength }, privateKey, data), {
+        name: 'OperationError',
+      });
+    assert.strictEqual(await subtle.verify(
+      { name: 'RSA-PSS', saltLength }, publicKey, signature, data), false);
+  }
+}
+
+async function testSaltLengths(keyLength) {
+  // Reuse the same RSA key material across hashes. The salt boundary depends
+  // on the modulus length and digest size, not on a newly generated modulus.
+  const { publicKey, privateKey } = await subtle.generateKey({
+    name: 'RSA-PSS',
+    modulusLength: keyLength,
+    publicExponent: new Uint8Array([1, 0, 1]),
+    hash: 'SHA-256',
+  }, true, ['sign', 'verify']);
+  const [spki, pkcs8] = await Promise.all([
+    subtle.exportKey('spki', publicKey),
+    subtle.exportKey('pkcs8', privateKey),
+  ]);
+
+  const variations = [];
+  for (const [hash, hLen] of [
+    ['SHA-1', 20],
+    ['SHA-256', 32],
+    ['SHA-384', 48],
+    ['SHA-512', 64],
+    // SHA-3 is only supported for digest operations in BoringSSL.
+    ...(!isBoringSSL ? [
+      ['SHA3-256', 32],
+      ['SHA3-384', 48],
+      ['SHA3-512', 64],
+    ] : []),
+  ]) {
+    if (rejectsSha1Signing && hash === 'SHA-1')
+      continue;
+    variations.push(testSaltLength(keyLength, hash, hLen, spki, pkcs8));
+  }
+  await Promise.all(variations);
 }
 
 (async function() {
   const variations = [];
 
+  // The shared fixtures also cover node:crypto; WebCrypto only supports
+  // SHA-3 for digest operations in BoringSSL.
   rsa_pkcs().forEach((vector) => {
+    if (isBoringSSL && vector.hash.startsWith('SHA3-'))
+      return;
     variations.push(testVerify(vector));
-    variations.push(testSign(vector));
+    variations.push(rejectsSha1Signing && vector.hash === 'SHA-1' ?
+      testFipsSignRejected(vector) : testSign(vector));
   });
   rsa_pss().forEach((vector) => {
+    if (isBoringSSL && vector.hash.startsWith('SHA3-'))
+      return;
     variations.push(testVerify(vector));
-    variations.push(testSign(vector));
+    variations.push(rejectsSha1Signing && vector.hash === 'SHA-1' ?
+      testFipsSignRejected(vector) : testSign(vector));
   });
+
+  for (const keyLength of fips3 ? [2048] : [1024, 2048])
+    variations.push(testSaltLengths(keyLength));
 
   await Promise.all(variations);
 })().then(common.mustCall());

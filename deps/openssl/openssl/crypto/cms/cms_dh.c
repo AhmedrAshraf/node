@@ -1,5 +1,5 @@
 /*
- * Copyright 2006-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2006-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -13,11 +13,12 @@
 #include <openssl/err.h>
 #include <openssl/core_names.h>
 #include "internal/sizes.h"
+#include "crypto/asn1.h"
 #include "crypto/evp.h"
 #include "cms_local.h"
 
 static int dh_cms_set_peerkey(EVP_PKEY_CTX *pctx,
-                              X509_ALGOR *alg, ASN1_BIT_STRING *pubkey)
+    X509_ALGOR *alg, ASN1_BIT_STRING *pubkey)
 {
     const ASN1_OBJECT *aoid;
     int atype;
@@ -28,13 +29,13 @@ static int dh_cms_set_peerkey(EVP_PKEY_CTX *pctx,
     BIGNUM *bnpub = NULL;
     const unsigned char *p;
     unsigned char *buf = NULL;
-    int plen;
+    size_t plen;
 
     X509_ALGOR_get0(&aoid, &atype, &aval, alg);
     if (OBJ_obj2nid(aoid) != NID_dhpublicnumber)
         goto err;
     /* Only absent parameters allowed in RFC XXXX */
-    if (atype != V_ASN1_UNDEF && atype == V_ASN1_NULL)
+    if (atype != V_ASN1_UNDEF && atype != V_ASN1_NULL)
         goto err;
 
     pk = EVP_PKEY_CTX_get0_pkey(pctx);
@@ -42,34 +43,38 @@ static int dh_cms_set_peerkey(EVP_PKEY_CTX *pctx,
         goto err;
 
     /* Get public key */
-    plen = ASN1_STRING_length(pubkey);
+    plen = ASN1_STRING_get_length(pubkey);
+    if (plen > INT_MAX)
+        goto err;
     p = ASN1_STRING_get0_data(pubkey);
     if (p == NULL || plen == 0)
         goto err;
 
-    if ((public_key = d2i_ASN1_INTEGER(NULL, &p, plen)) == NULL)
+    if ((public_key = d2i_ASN1_INTEGER(NULL, &p, (int)plen)) == NULL)
         goto err;
     /*
      * Pad to full p parameter size as that is checked by
      * EVP_PKEY_set1_encoded_public_key()
      */
     plen = EVP_PKEY_get_size(pk);
+    if (plen > INT_MAX)
+        goto err;
     if ((bnpub = ASN1_INTEGER_to_BN(public_key, NULL)) == NULL)
         goto err;
     if ((buf = OPENSSL_malloc(plen)) == NULL)
         goto err;
-    if (BN_bn2binpad(bnpub, buf, plen) < 0)
+    if (BN_bn2binpad(bnpub, buf, (int)plen) < 0)
         goto err;
 
     pkpeer = EVP_PKEY_new();
     if (pkpeer == NULL
-            || !EVP_PKEY_copy_parameters(pkpeer, pk)
-            || !EVP_PKEY_set1_encoded_public_key(pkpeer, buf, plen))
+        || !EVP_PKEY_copy_parameters(pkpeer, pk)
+        || EVP_PKEY_set1_encoded_public_key(pkpeer, buf, (int)plen) <= 0)
         goto err;
 
     if (EVP_PKEY_derive_set_peer(pctx, pkpeer) > 0)
         rv = 1;
- err:
+err:
     ASN1_INTEGER_free(public_key);
     BN_free(bnpub);
     OPENSSL_free(buf);
@@ -85,33 +90,41 @@ static int dh_cms_set_shared_info(EVP_PKEY_CTX *pctx, CMS_RecipientInfo *ri)
     const unsigned char *p;
     unsigned char *dukm = NULL;
     size_t dukmlen = 0;
-    int keylen, plen;
+    int keylen;
+    size_t plen;
     EVP_CIPHER *kekcipher = NULL;
     EVP_CIPHER_CTX *kekctx;
+    const ASN1_OBJECT *aoid;
+    const void *parameter = NULL;
+    int ptype = 0;
     char name[OSSL_MAX_NAME_SIZE];
 
     if (!CMS_RecipientInfo_kari_get0_alg(ri, &alg, &ukm))
         goto err;
 
+    X509_ALGOR_get0(&aoid, &ptype, &parameter, alg);
+
     /*
      * For DH we only have one OID permissible. If ever any more get defined
      * we will need something cleverer.
      */
-    if (OBJ_obj2nid(alg->algorithm) != NID_id_smime_alg_ESDH) {
+    if (OBJ_obj2nid(aoid) != NID_id_smime_alg_ESDH) {
         ERR_raise(ERR_LIB_CMS, CMS_R_KDF_PARAMETER_ERROR);
         goto err;
     }
 
     if (EVP_PKEY_CTX_set_dh_kdf_type(pctx, EVP_PKEY_DH_KDF_X9_42) <= 0
-            || EVP_PKEY_CTX_set_dh_kdf_md(pctx, EVP_sha1()) <= 0)
+        || EVP_PKEY_CTX_set_dh_kdf_md(pctx, EVP_sha1()) <= 0)
         goto err;
 
-    if (alg->parameter->type != V_ASN1_SEQUENCE)
+    if (ptype != V_ASN1_SEQUENCE)
         goto err;
 
-    p = alg->parameter->value.sequence->data;
-    plen = alg->parameter->value.sequence->length;
-    kekalg = d2i_X509_ALGOR(NULL, &p, plen);
+    p = ASN1_STRING_get0_data(parameter);
+    plen = ASN1_STRING_get_length(parameter);
+    if (plen > INT_MAX)
+        goto err;
+    kekalg = d2i_X509_ALGOR(NULL, &p, (int)plen);
     if (kekalg == NULL)
         goto err;
     kekctx = CMS_RecipientInfo_kari_get0_ctx(ri);
@@ -122,7 +135,7 @@ static int dh_cms_set_shared_info(EVP_PKEY_CTX *pctx, CMS_RecipientInfo *ri)
         goto err;
 
     kekcipher = EVP_CIPHER_fetch(pctx->libctx, name, pctx->propquery);
-    if (kekcipher == NULL 
+    if (kekcipher == NULL
         || EVP_CIPHER_get_mode(kekcipher) != EVP_CIPH_WRAP_MODE)
         goto err;
     if (!EVP_EncryptInit_ex(kekctx, kekcipher, NULL, NULL, NULL))
@@ -135,23 +148,25 @@ static int dh_cms_set_shared_info(EVP_PKEY_CTX *pctx, CMS_RecipientInfo *ri)
         goto err;
     /* Use OBJ_nid2obj to ensure we use built in OID that isn't freed */
     if (EVP_PKEY_CTX_set0_dh_kdf_oid(pctx,
-                                     OBJ_nid2obj(EVP_CIPHER_get_type(kekcipher)))
+            OBJ_nid2obj(EVP_CIPHER_get_type(kekcipher)))
         <= 0)
         goto err;
 
     if (ukm != NULL) {
-        dukmlen = ASN1_STRING_length(ukm);
-        dukm = OPENSSL_memdup(ASN1_STRING_get0_data(ukm), dukmlen);
+        dukmlen = ASN1_STRING_get_length(ukm);
+        if (dukmlen > INT_MAX)
+            goto err;
+        dukm = OPENSSL_memdup(ASN1_STRING_get0_data(ukm), (int)dukmlen);
         if (dukm == NULL)
             goto err;
     }
 
-    if (EVP_PKEY_CTX_set0_dh_kdf_ukm(pctx, dukm, dukmlen) <= 0)
+    if (EVP_PKEY_CTX_set0_dh_kdf_ukm(pctx, dukm, (int)dukmlen) <= 0)
         goto err;
     dukm = NULL;
 
     rv = 1;
- err:
+err:
     X509_ALGOR_free(kekalg);
     EVP_CIPHER_free(kekcipher);
     OPENSSL_free(dukm);
@@ -170,9 +185,9 @@ static int dh_cms_decrypt(CMS_RecipientInfo *ri)
         ASN1_BIT_STRING *pubkey;
 
         if (!CMS_RecipientInfo_kari_get0_orig_id(ri, &alg, &pubkey,
-                                                 NULL, NULL, NULL))
+                NULL, NULL, NULL))
             return 0;
-        if (alg ==  NULL || pubkey == NULL)
+        if (alg == NULL || pubkey == NULL)
             return 0;
         if (!dh_cms_set_peerkey(pctx, alg, pubkey)) {
             ERR_raise(ERR_LIB_CMS, CMS_R_PEER_KEY_ERROR);
@@ -211,7 +226,7 @@ static int dh_cms_encrypt(CMS_RecipientInfo *ri)
     /* Get ephemeral key */
     pkey = EVP_PKEY_CTX_get0_pkey(pctx);
     if (!CMS_RecipientInfo_kari_get0_orig_id(ri, &talg, &pubkey,
-                                             NULL, NULL, NULL))
+            NULL, NULL, NULL))
         goto err;
 
     /* Is everything uninitialised? */
@@ -234,12 +249,11 @@ static int dh_cms_encrypt(CMS_RecipientInfo *ri)
         if (penclen <= 0)
             goto err;
         ASN1_STRING_set0(pubkey, penc, penclen);
-        pubkey->flags &= ~(ASN1_STRING_FLAG_BITS_LEFT | 0x07);
-        pubkey->flags |= ASN1_STRING_FLAG_BITS_LEFT;
+        ossl_asn1_bit_string_set_unused_bits(pubkey, 0);
 
         penc = NULL;
-        X509_ALGOR_set0(talg, OBJ_nid2obj(NID_dhpublicnumber),
-                        V_ASN1_UNDEF, NULL);
+        (void)X509_ALGOR_set0(talg, OBJ_nid2obj(NID_dhpublicnumber),
+            V_ASN1_UNDEF, NULL); /* cannot fail */
     }
 
     /* See if custom parameters set */
@@ -293,13 +307,15 @@ static int dh_cms_encrypt(CMS_RecipientInfo *ri)
         goto err;
 
     if (ukm != NULL) {
-        dukmlen = ASN1_STRING_length(ukm);
+        dukmlen = ASN1_STRING_get_length(ukm);
+        if (dukmlen > INT_MAX)
+            goto err;
         dukm = OPENSSL_memdup(ASN1_STRING_get0_data(ukm), dukmlen);
         if (dukm == NULL)
             goto err;
     }
 
-    if (EVP_PKEY_CTX_set0_dh_kdf_ukm(pctx, dukm, dukmlen) <= 0)
+    if (EVP_PKEY_CTX_set0_dh_kdf_ukm(pctx, dukm, (int)dukmlen) <= 0)
         goto err;
     dukm = NULL;
 
@@ -309,19 +325,19 @@ static int dh_cms_encrypt(CMS_RecipientInfo *ri)
      */
     penc = NULL;
     penclen = i2d_X509_ALGOR(wrap_alg, &penc);
-    if (penc == NULL || penclen == 0)
+    if (penclen <= 0)
         goto err;
     wrap_str = ASN1_STRING_new();
     if (wrap_str == NULL)
         goto err;
     ASN1_STRING_set0(wrap_str, penc, penclen);
     penc = NULL;
-    X509_ALGOR_set0(talg, OBJ_nid2obj(NID_id_smime_alg_ESDH),
-                    V_ASN1_SEQUENCE, wrap_str);
+    rv = X509_ALGOR_set0(talg, OBJ_nid2obj(NID_id_smime_alg_ESDH),
+        V_ASN1_SEQUENCE, wrap_str);
+    if (!rv)
+        ASN1_STRING_free(wrap_str);
 
-    rv = 1;
-
- err:
+err:
     OPENSSL_free(penc);
     X509_ALGOR_free(wrap_alg);
     OPENSSL_free(dukm);

@@ -9,6 +9,15 @@ const crypto = require('crypto');
 const constants = crypto.constants;
 
 const fixtures = require('../common/fixtures');
+const {
+  hasOpenSSL,
+  hasFIPS,
+  isBoringSSL,
+} = require('../common/crypto');
+const fips3 = hasFIPS(3);
+const fips35 = hasFIPS(3, 5);
+const fips4 = hasFIPS(4);
+const wrongPassphrase = 'wrong-password';
 
 // Test certificates
 const certPem = fixtures.readKey('rsa_cert.crt');
@@ -16,33 +25,38 @@ const keyPem = fixtures.readKey('rsa_private.pem');
 const rsaKeySize = 2048;
 const rsaPubPem = fixtures.readKey('rsa_public.pem', 'ascii');
 const rsaKeyPem = fixtures.readKey('rsa_private.pem', 'ascii');
-const rsaKeyPemEncrypted = fixtures.readKey('rsa_private_encrypted.pem',
-                                            'ascii');
+// Fixed ciphertexts keep wrong passwords from occasionally producing valid
+// padding and a decoder error instead of the expected bad decrypt.
+const rsaKeyPemEncrypted = fixtures.readKey(
+  'rsa_private_encrypted.pem', 'ascii');
 const dsaPubPem = fixtures.readKey('dsa_public.pem', 'ascii');
 const dsaKeyPem = fixtures.readKey('dsa_private.pem', 'ascii');
-const dsaKeyPemEncrypted = fixtures.readKey('dsa_private_encrypted.pem',
-                                            'ascii');
+const dsaKeyPemEncrypted = fixtures.readKey(
+  'dsa_private_encrypted.pem', 'ascii');
 const rsaPkcs8KeyPem = fixtures.readKey('rsa_private_pkcs8.pem');
 const dsaPkcs8KeyPem = fixtures.readKey('dsa_private_pkcs8.pem');
 
 const ec = new TextEncoder();
 
-const openssl1DecryptError = {
-  message: 'error:06065064:digital envelope routines:EVP_DecryptFinal_ex:' +
-    'bad decrypt',
-  code: 'ERR_OSSL_EVP_BAD_DECRYPT',
-  reason: 'bad decrypt',
-  function: 'EVP_DecryptFinal_ex',
-  library: 'digital envelope routines',
-};
+const decryptError = fips4 ?
+  { code: 'ERR_OSSL_BAD_DECRYPT' } :
+  isBoringSSL ? {
+    message: 'error:1e000065:Cipher functions:OPENSSL_internal:BAD_DECRYPT',
+    code: 'ERR_OSSL_BAD_DECRYPT',
+    reason: 'BAD_DECRYPT',
+    function: 'OPENSSL_internal',
+    library: 'Cipher functions',
+  } : {
+    message: 'error:1C800064:Provider routines::bad decrypt',
+  };
 
-const decryptError = common.hasOpenSSL3 ?
-  { message: 'error:1C800064:Provider routines::bad decrypt' } :
-  openssl1DecryptError;
-
-const decryptPrivateKeyError = common.hasOpenSSL3 ? {
+const decryptPrivateKeyError = fips4 ? {
+  code: 'ERR_OSSL_BAD_DECRYPT',
+} : isBoringSSL ? {
+  message: 'error:1e000065:Cipher functions:OPENSSL_internal:BAD_DECRYPT',
+} : {
   message: 'error:1C800064:Provider routines::bad decrypt',
-} : openssl1DecryptError;
+};
 
 function getBufferCopy(buf) {
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
@@ -143,10 +157,8 @@ function getBufferCopy(buf) {
   }, encryptedBuffer);
   assert.strictEqual(decryptedBufferWithPassword.toString(), input);
 
-  // Now with RSA_NO_PADDING. Plaintext needs to match key size.
-  // OpenSSL 3.x has a rsa_check_padding that will cause an error if
-  // RSA_NO_PADDING is used.
-  if (!common.hasOpenSSL3) {
+  // BoringSSL does not apply OpenSSL's rsa_check_padding validation here.
+  if (isBoringSSL) {
     {
       const plaintext = 'x'.repeat(rsaKeySize / 8);
       encryptedBuffer = crypto.privateEncrypt({
@@ -182,14 +194,14 @@ function getBufferCopy(buf) {
   assert.throws(() => {
     crypto.privateDecrypt({
       key: rsaKeyPemEncrypted,
-      passphrase: 'wrong'
+      passphrase: wrongPassphrase
     }, bufferToEncrypt);
   }, decryptError);
 
   assert.throws(() => {
     crypto.publicEncrypt({
       key: rsaKeyPemEncrypted,
-      passphrase: 'wrong'
+      passphrase: wrongPassphrase
     }, encryptedBuffer);
   }, decryptError);
 
@@ -201,7 +213,7 @@ function getBufferCopy(buf) {
   assert.throws(() => {
     crypto.publicDecrypt({
       key: rsaKeyPemEncrypted,
-      passphrase: Buffer.from('wrong')
+      passphrase: Buffer.from(wrongPassphrase)
     }, encryptedBuffer);
   }, decryptError);
 }
@@ -221,24 +233,116 @@ function test_rsa(padding, encryptOaepHash, decryptOaepHash) {
     oaepHash: encryptOaepHash
   }, bufferToEncrypt);
 
-  let decryptedBuffer = crypto.privateDecrypt({
-    key: rsaKeyPem,
-    padding: padding,
-    oaepHash: decryptOaepHash
-  }, encryptedBuffer);
-  assert.deepStrictEqual(decryptedBuffer, input);
 
-  decryptedBuffer = crypto.privateDecrypt({
-    key: rsaPkcs8KeyPem,
-    padding: padding,
-    oaepHash: decryptOaepHash
-  }, encryptedBuffer);
-  assert.deepStrictEqual(decryptedBuffer, input);
+  if (padding === constants.RSA_PKCS1_PADDING) {
+    if (!process.config.variables.node_shared_openssl) {
+      // TODO(richardlau) remove check and else branch after deps/openssl
+      // is upgraded.
+      if (hasOpenSSL(3, 2)) {
+        let decryptedBuffer = crypto.privateDecrypt({
+          key: rsaKeyPem,
+          padding: padding,
+          oaepHash: decryptOaepHash
+        }, encryptedBuffer);
+        assert.deepStrictEqual(decryptedBuffer, input);
+
+        decryptedBuffer = crypto.privateDecrypt({
+          key: rsaPkcs8KeyPem,
+          padding: padding,
+          oaepHash: decryptOaepHash
+        }, encryptedBuffer);
+        assert.deepStrictEqual(decryptedBuffer, input);
+      } else {
+        assert.throws(() => {
+          crypto.privateDecrypt({
+            key: rsaKeyPem,
+            padding: padding,
+            oaepHash: decryptOaepHash
+          }, encryptedBuffer);
+        }, { code: 'ERR_INVALID_ARG_VALUE' });
+        assert.throws(() => {
+          crypto.privateDecrypt({
+            key: rsaPkcs8KeyPem,
+            padding: padding,
+            oaepHash: decryptOaepHash
+          }, encryptedBuffer);
+        }, { code: 'ERR_INVALID_ARG_VALUE' });
+      }
+    } else {
+      // The version of a linked against OpenSSL. May
+      // or may not support implicit rejection. Figuring
+      // this out in the test is not feasible but we
+      // require that it pass based on one of the two
+      // cases of supporting it or not.
+      try {
+        // The expected exceptions should be thrown if implicit rejection
+        // is not supported
+        assert.throws(() => {
+          crypto.privateDecrypt({
+            key: rsaKeyPem,
+            padding: padding,
+            oaepHash: decryptOaepHash
+          }, encryptedBuffer);
+        }, { code: 'ERR_INVALID_ARG_VALUE' });
+        assert.throws(() => {
+          crypto.privateDecrypt({
+            key: rsaPkcs8KeyPem,
+            padding: padding,
+            oaepHash: decryptOaepHash
+          }, encryptedBuffer);
+        }, { code: 'ERR_INVALID_ARG_VALUE' });
+      } catch (e) {
+        if (e.toString() ===
+            'AssertionError [ERR_ASSERTION]: Missing expected exception.') {
+          // Implicit rejection must be supported since
+          // we did not get the exceptions that are thrown
+          // when it is not, we should be able to decrypt
+          let decryptedBuffer = crypto.privateDecrypt({
+            key: rsaKeyPem,
+            padding: padding,
+            oaepHash: decryptOaepHash
+          }, encryptedBuffer);
+          assert.deepStrictEqual(decryptedBuffer, input);
+
+          decryptedBuffer = crypto.privateDecrypt({
+            key: rsaPkcs8KeyPem,
+            padding: padding,
+            oaepHash: decryptOaepHash
+          }, encryptedBuffer);
+          assert.deepStrictEqual(decryptedBuffer, input);
+        } else {
+          // There was an exception but it is not the one we expect if implicit
+          // rejection is not supported so there was some other failure,
+          // re-throw it so the test fails
+          throw e;
+        }
+      }
+    }
+  } else {
+    let decryptedBuffer = crypto.privateDecrypt({
+      key: rsaKeyPem,
+      padding: padding,
+      oaepHash: decryptOaepHash
+    }, encryptedBuffer);
+    assert.deepStrictEqual(decryptedBuffer, input);
+
+    decryptedBuffer = crypto.privateDecrypt({
+      key: rsaPkcs8KeyPem,
+      padding: padding,
+      oaepHash: decryptOaepHash
+    }, encryptedBuffer);
+    assert.deepStrictEqual(decryptedBuffer, input);
+  }
 }
 
 test_rsa('RSA_NO_PADDING');
-test_rsa('RSA_PKCS1_PADDING');
 test_rsa('RSA_PKCS1_OAEP_PADDING');
+
+if (!isBoringSSL) {
+  test_rsa('RSA_PKCS1_PADDING');
+} else {
+  common.printSkipMessage('Skipping unsupported RSA_PKCS1_PADDING test case');
+}
 
 // Test OAEP with different hash functions.
 test_rsa('RSA_PKCS1_OAEP_PADDING', undefined, 'sha1');
@@ -247,8 +351,12 @@ test_rsa('RSA_PKCS1_OAEP_PADDING', 'sha256', 'sha256');
 test_rsa('RSA_PKCS1_OAEP_PADDING', 'sha512', 'sha512');
 assert.throws(() => {
   test_rsa('RSA_PKCS1_OAEP_PADDING', 'sha256', 'sha512');
-}, {
-  code: 'ERR_OSSL_RSA_OAEP_DECODING_ERROR'
+}, fips35 ? {
+  code: 'ERR_OSSL_EVP_PROVIDER_ASYM_CIPHER_FAILURE',
+} : fips3 ? {
+  message: 'error:00000000:lib(0)::reason(0)',
+} : {
+  code: 'ERR_OSSL_RSA_OAEP_DECODING_ERROR',
 });
 
 // The following RSA-OAEP test cases were created using the WebCrypto API to
@@ -314,8 +422,9 @@ for (const fn of [crypto.publicEncrypt, crypto.privateDecrypt]) {
 }
 
 // Test RSA key signing/verification
-let rsaSign = crypto.createSign('SHA1');
-let rsaVerify = crypto.createVerify('SHA1');
+const rsaDigest = fips3 ? 'SHA256' : 'SHA1';
+let rsaSign = crypto.createSign(rsaDigest);
+let rsaVerify = crypto.createVerify(rsaDigest);
 assert.ok(rsaSign);
 assert.ok(rsaVerify);
 
@@ -326,36 +435,39 @@ const expectedSignature = fixtures.readKey(
 
 rsaSign.update(rsaPubPem);
 let rsaSignature = rsaSign.sign(rsaKeyPem, 'hex');
-assert.strictEqual(rsaSignature, expectedSignature);
+if (!fips3)
+  assert.strictEqual(rsaSignature, expectedSignature);
 
 rsaVerify.update(rsaPubPem);
 assert.strictEqual(rsaVerify.verify(rsaPubPem, rsaSignature, 'hex'), true);
 
 // Test RSA PKCS#8 key signing/verification
-rsaSign = crypto.createSign('SHA1');
+rsaSign = crypto.createSign(rsaDigest);
 rsaSign.update(rsaPubPem);
 rsaSignature = rsaSign.sign(rsaPkcs8KeyPem, 'hex');
-assert.strictEqual(rsaSignature, expectedSignature);
+if (!fips3)
+  assert.strictEqual(rsaSignature, expectedSignature);
 
-rsaVerify = crypto.createVerify('SHA1');
+rsaVerify = crypto.createVerify(rsaDigest);
 rsaVerify.update(rsaPubPem);
 assert.strictEqual(rsaVerify.verify(rsaPubPem, rsaSignature, 'hex'), true);
 
 // Test RSA key signing/verification with encrypted key
-rsaSign = crypto.createSign('SHA1');
+rsaSign = crypto.createSign(rsaDigest);
 rsaSign.update(rsaPubPem);
 const signOptions = { key: rsaKeyPemEncrypted, passphrase: 'password' };
 rsaSignature = rsaSign.sign(signOptions, 'hex');
-assert.strictEqual(rsaSignature, expectedSignature);
+if (!fips3)
+  assert.strictEqual(rsaSignature, expectedSignature);
 
-rsaVerify = crypto.createVerify('SHA1');
+rsaVerify = crypto.createVerify(rsaDigest);
 rsaVerify.update(rsaPubPem);
 assert.strictEqual(rsaVerify.verify(rsaPubPem, rsaSignature, 'hex'), true);
 
-rsaSign = crypto.createSign('SHA1');
+rsaSign = crypto.createSign(rsaDigest);
 rsaSign.update(rsaPubPem);
 assert.throws(() => {
-  const signOptions = { key: rsaKeyPemEncrypted, passphrase: 'wrong' };
+  const signOptions = { key: rsaKeyPemEncrypted, passphrase: wrongPassphrase };
   rsaSign.sign(signOptions, 'hex');
 }, decryptPrivateKeyError);
 
@@ -401,48 +513,45 @@ assert.throws(() => {
 //
 // Test DSA signing and verification
 //
-{
+if (!isBoringSSL) {
   const input = 'I AM THE WALRUS';
 
   // DSA signatures vary across runs so there is no static string to verify
   // against.
-  const sign = crypto.createSign('SHA1');
+  const dsaDigest = fips3 ? 'SHA256' : 'SHA1';
+  const sign = crypto.createSign(dsaDigest);
   sign.update(input);
   const signature = sign.sign(dsaKeyPem, 'hex');
 
-  const verify = crypto.createVerify('SHA1');
+  const verify = crypto.createVerify(dsaDigest);
   verify.update(input);
 
   assert.strictEqual(verify.verify(dsaPubPem, signature, 'hex'), true);
 
-  // Test the legacy 'DSS1' name.
-  const sign2 = crypto.createSign('DSS1');
-  sign2.update(input);
-  const signature2 = sign2.sign(dsaKeyPem, 'hex');
-
-  const verify2 = crypto.createVerify('DSS1');
-  verify2.update(input);
-
-  assert.strictEqual(verify2.verify(dsaPubPem, signature2, 'hex'), true);
+} else {
+  common.printSkipMessage('Skipping unsupported DSA test case');
 }
 
 
 //
 // Test DSA signing and verification with PKCS#8 private key
 //
-{
+if (!isBoringSSL) {
   const input = 'I AM THE WALRUS';
 
   // DSA signatures vary across runs so there is no static string to verify
   // against.
-  const sign = crypto.createSign('SHA1');
+  const dsaDigest = fips3 ? 'SHA256' : 'SHA1';
+  const sign = crypto.createSign(dsaDigest);
   sign.update(input);
   const signature = sign.sign(dsaPkcs8KeyPem, 'hex');
 
-  const verify = crypto.createVerify('SHA1');
+  const verify = crypto.createVerify(dsaDigest);
   verify.update(input);
 
   assert.strictEqual(verify.verify(dsaPubPem, signature, 'hex'), true);
+} else {
+  common.printSkipMessage('Skipping unsupported DSA test case');
 }
 
 
@@ -452,23 +561,26 @@ assert.throws(() => {
 const input = 'I AM THE WALRUS';
 
 {
-  const sign = crypto.createSign('SHA1');
+  const sign = crypto.createSign(fips3 ? 'SHA256' : 'SHA1');
   sign.update(input);
   assert.throws(() => {
-    sign.sign({ key: dsaKeyPemEncrypted, passphrase: 'wrong' }, 'hex');
+    sign.sign({ key: dsaKeyPemEncrypted, passphrase: wrongPassphrase }, 'hex');
   }, decryptPrivateKeyError);
 }
 
-{
+if (!isBoringSSL) {
   // DSA signatures vary across runs so there is no static string to verify
   // against.
-  const sign = crypto.createSign('SHA1');
+  const dsaDigest = fips3 ? 'SHA256' : 'SHA1';
+  const sign = crypto.createSign(dsaDigest);
   sign.update(input);
   const signOptions = { key: dsaKeyPemEncrypted, passphrase: 'password' };
   const signature = sign.sign(signOptions, 'hex');
 
-  const verify = crypto.createVerify('SHA1');
+  const verify = crypto.createVerify(dsaDigest);
   verify.update(input);
 
   assert.strictEqual(verify.verify(dsaPubPem, signature, 'hex'), true);
+} else {
+  common.printSkipMessage('Skipping unsupported DSA test case');
 }

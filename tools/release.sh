@@ -8,18 +8,31 @@
 
 set -e
 
-webhost=direct.nodejs.org
+[ -z "$NODEJS_RELEASE_HOST" ] && NODEJS_RELEASE_HOST=direct.nodejs.org
+
+webhost=$NODEJS_RELEASE_HOST
 webuser=dist
 promotablecmd=dist-promotable
 promotecmd=dist-promote
 signcmd=dist-sign
+allPGPKeys=""
 customsshkey="" # let ssh and scp use default key
+readmePath="README.md"
 signversion=""
+cloudflare_bucket="r2:dist-prod"
 
-while getopts ":i:s:" option; do
+while getopts ":i:r:s:a" option; do
     case "${option}" in
+        a)
+            # With -a, local keys are not filtered based on the one listed in the README
+            # useful if you want to sign with a subkey.
+            allPGPKeys="true"
+            ;;
         i)
             customsshkey="-i ${OPTARG}"
+            ;;
+        r)
+            readmePath="${OPTARG}"
             ;;
         s)
             signversion="${OPTARG}"
@@ -41,7 +54,16 @@ shift $((OPTIND-1))
 
 echo "# Selecting GPG key ..."
 
-gpgkey=$(gpg --list-secret-keys --keyid-format SHORT | awk -F'( +|/)' '/^(sec|ssb)/{print $3}')
+
+if [ -z "$allPGPKeys" ]; then
+  gpgkey="$(awk '{
+    if ($1 == "gpg" && $2 == "--keyserver" && $4 == "--recv-keys" && (1 == 2'"$(
+      gpg --list-secret-keys | awk -F' = ' '/^ +Key fingerprint/{ gsub(/ /,"",$2); print " || $5 == \"" $2 "\"" }' || true
+    )"')) { print substr($5, 33) }
+  }' "$readmePath")"
+else
+  gpgkey=$(gpg --list-secret-keys --keyid-format SHORT | awk -F'( +|/)' '/^(sec|ssb)/{print $3}')
+fi
 keycount=$(echo "$gpgkey" | wc -w)
 
 if [ "$keycount" -eq 0 ]; then
@@ -65,13 +87,12 @@ elif [ "$keycount" -ne 1 ]; then
   gpgkey=$(echo "$gpgkey" | sed -n "${keynum}p")
 fi
 
-gpgfing=$(gpg --keyid-format 0xLONG --fingerprint "$gpgkey" | grep 'Key fingerprint =' | awk -F' = ' '{print $2}' | tr -d ' ')
+gpgfing=$(gpg --keyid-format 0xLONG --fingerprint "$gpgkey" | awk -F' = ' '/^ +Key fingerprint/{gsub(/ /,"",$2);print $2}')
 
-grep -q "$gpgfing" README.md || (\
-  echo 'Error: this GPG key fingerprint is not listed in ./README.md' && \
-  exit 1 \
-)
-
+grep -q "$gpgfing" "$readmePath" || {
+  echo "Error: this GPG key fingerprint is not listed in $readmePath"
+  exit 1
+}
 
 echo "Using GPG key: $gpgkey"
 echo "  Fingerprint: $gpgfing"
@@ -94,12 +115,16 @@ sign() {
   # local version=$1
 
   ghtaggedversion=$(curl -sL "https://raw.githubusercontent.com/nodejs/node/$1/src/node_version.h" \
-      | awk '/define NODE_(MAJOR|MINOR|PATCH)_VERSION/{ v = v "." $3 } END{ v = "v" substr(v, 2); print v }')
+      | awk '/define NODE_(MAJOR|MINOR|PATCH)_VERSION/{ v = v "." $3 }
+             /define NODE_VERSION_IS_RELEASE/{ r = $3 }
+             /define NODE_ALPHA_(MAJOR|MINOR|PATCH)_VERSION/{ a = a "." $3 }
+             END{ v = "v" substr(v, 2); if (r == 1 && a != "") v = v "-alpha" a; print v }')
   if [ "$1" != "${ghtaggedversion}" ]; then
     echo "Could not find tagged version on github.com/nodejs/node, did you push your tag?"
     exit 1
   fi
 
+  # /home/dist/${site}/release
   # shellcheck disable=SC2086,SC2029
   shapath=$(ssh ${customsshkey} "${webuser}@${webhost}" $signcmd nodejs $1)
 
@@ -132,7 +157,7 @@ sign() {
   echo ""
 
   while true; do
-    printf "Upload files? [y/n] "
+    printf "Upload files to %s and Cloudflare R2? [y/n] " "$webhost"
     yorn=""
     read -r yorn
 
@@ -141,10 +166,26 @@ sign() {
     fi
 
     if [ "X${yorn}" = "Xy" ]; then
+      # Copy SHASUMS256.txt and its signatures to the web host:
       # shellcheck disable=SC2086
       scp ${customsshkey} "${tmpdir}/${shafile}" "${tmpdir}/${shafile}.asc" "${tmpdir}/${shafile}.sig" "${webuser}@${webhost}:${shadir}/"
       # shellcheck disable=SC2086,SC2029
       ssh ${customsshkey} "${webuser}@${webhost}" chmod 644 "${shadir}/${shafile}.asc" "${shadir}/${shafile}.sig"
+
+      # Copy the signatures to Cloudflare R2:
+      # Note: the binaries and SHASUMS256.txt should already be in the bucket
+      # since the promotion script should take care of uploading them.
+
+      # Remove /home/dist/ part
+      r2dir=$(echo "$shadir" | cut -c 12-)
+
+      # Copy SHASUMS256.txt.asc
+      # shellcheck disable=SC2086,SC2029
+      ssh ${customsshkey} "${webuser}@${webhost}" rclone copyto "${shadir}/${shafile}.asc" "${cloudflare_bucket}/${r2dir}/${shafile}.asc"
+
+      # Copy SHASUMS256.txt.sig
+      # shellcheck disable=SC2086,SC2029
+      ssh ${customsshkey} "${webuser}@${webhost}" rclone copyto "${shadir}/${shafile}.sig" "${cloudflare_bucket}/${r2dir}/${shafile}.sig"
       break
     fi
   done

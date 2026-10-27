@@ -41,7 +41,7 @@ for (let i = 0; i < buffer.length; i++) {
 }
 
 
-const web = http.Server(common.mustCall((req, res) => {
+const web = new http.Server(common.mustCall((req, res) => {
   web.close();
 
   const socket = net.Stream();
@@ -57,9 +57,7 @@ const web = http.Server(common.mustCall((req, res) => {
     res.end();
   }));
 
-  req.connection.on('error', (e) => {
-    assert.ifError(e);
-  });
+  req.connection.on('error', common.mustNotCall());
 }));
 
 web.listen(webPort, startClient);
@@ -70,21 +68,19 @@ const tcp = net.Server(common.mustCall((s) => {
 
   let i = 0;
 
-  s.on('data', (d) => {
+  s.on('data', common.mustCallAtLeast((d) => {
     tcpLengthSeen += d.length;
     for (let j = 0; j < d.length; j++) {
       assert.strictEqual(d[j], buffer[i]);
       i++;
     }
-  });
+  }));
 
   s.on('end', common.mustCall(() => {
     s.end();
   }));
 
-  s.on('error', (e) => {
-    assert.ifError(e);
-  });
+  s.on('error', common.mustNotCall());
 }));
 
 tcp.listen(tcpPort, startClient);
@@ -97,7 +93,10 @@ function startClient() {
     port: common.PORT,
     method: 'GET',
     path: '/',
-    headers: { 'content-length': buffer.length }
+    headers: {
+      'connection': 'close',
+      'content-length': buffer.length,
+    },
   }, common.mustCall((res) => {
     res.setEncoding('utf8');
     res.on('data', common.mustCall((string) => {

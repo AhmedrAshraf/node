@@ -23,7 +23,7 @@ a Node.js-specific environment.
 
 The full code can be found [in the Node.js source tree][embedtest.cc].
 
-### Setting up per-process state
+### Setting up a per-process state
 
 Node.js requires some per-process state management in order to run:
 
@@ -72,7 +72,52 @@ int main(int argc, char** argv) {
 }
 ```
 
-### Per-instance state
+### Restricting access to environment variables
+
+<!-- YAML
+added: REPLACEME
+-->
+
+When the arguments passed to `node::InitializeOncePerProcess()` enable the
+[Permission Model][] without `--allow-env=*`, the process environment must not
+contain any variable that [`--allow-env`][] does not grant access to.
+`node::InitializeOncePerProcess()` fails otherwise. Unlike the `node`
+executable, embedders own the process environment, so Node.js does not remove
+these variables itself.
+
+`node::ScrubProcessEnvironment()` removes them. Because it modifies the process
+environment without any locking that native code calling `getenv()`
+participates in, it must be called before starting any thread that may read the
+environment, and before `node::InitializeOncePerProcess()`:
+
+```cpp
+int main(int argc, char** argv) {
+  argv = uv_setup_args(argc, argv);
+  std::vector<std::string> args(argv, argv + argc);
+
+  // Keep the variables the embedder itself reads, in addition to the ones
+  // Node.js reads (see node::GetRuntimeEnvironmentDefaults()).
+  node::ProcessEnvironmentScrubOptions scrub_options;
+  scrub_options.allow = {"PORT", "APP_*"};
+  if (node::ScrubProcessEnvironment(scrub_options).IsNothing()) {
+    return 1;
+  }
+
+  // args contains, for example, --permission --allow-env=PORT
+  std::unique_ptr<node::InitializationResult> result =
+      node::InitializeOncePerProcess(args, {
+        node::ProcessInitializationFlags::kNoInitializeV8,
+        node::ProcessInitializationFlags::kNoInitializeNodeV8Platform
+      });
+  // ...
+}
+```
+
+`process.permission.drop('env', name)` removes a variable from the process
+environment, so it throws when called from a `node::Environment` created
+without `node::EnvironmentFlags::kOwnsProcessState`.
+
+### Setting up a per-instance state
 
 <!-- YAML
 changes:
@@ -86,11 +131,19 @@ Node.js has a concept of a “Node.js instance”, that is commonly being referr
 to as `node::Environment`. Each `node::Environment` is associated with:
 
 * Exactly one `v8::Isolate`, i.e. one JS Engine instance,
-* Exactly one `uv_loop_t`, i.e. one event loop, and
-* A number of `v8::Context`s, but exactly one main `v8::Context`.
+* Exactly one `uv_loop_t`, i.e. one event loop,
+* A number of `v8::Context`s, but exactly one main `v8::Context`, and
 * One `node::IsolateData` instance that contains information that could be
-  shared by multiple `node::Environment`s that use the same `v8::Isolate`.
-  Currently, no testing if performed for this scenario.
+  shared by multiple `node::Environment`s. The embedder should make sure
+  that `node::IsolateData` is shared only among `node::Environment`s that
+  use the same `v8::Isolate`, Node.js does not perform this check.
+
+`node::Environment`s that share a `node::IsolateData` also share its
+`uv_loop_t`. `node::FreeEnvironment()` runs that loop until the handles of the
+`node::Environment` being freed have closed. Timers, I/O callbacks and thread
+pool completions of the other `node::Environment`s that become due in those
+loop iterations run normally, including their JavaScript; only the
+`node::Environment` being freed can no longer call into JavaScript.
 
 In order to set up a `v8::Isolate`, an `v8::ArrayBuffer::Allocator` needs
 to be provided. One possible choice is the default Node.js allocator, which
@@ -114,7 +167,7 @@ int RunNodeInstance(MultiIsolatePlatform* platform,
                     const std::vector<std::string>& exec_args) {
   int exit_code = 0;
 
-  // Setup up a libuv event loop, v8::Isolate, and Node.js Environment.
+  // Set up a libuv event loop, v8::Isolate, and Node.js Environment.
   std::vector<std::string> errors;
   std::unique_ptr<CommonEnvironmentSetup> setup =
       CommonEnvironmentSetup::Create(platform, &errors, args, exec_args);
@@ -167,6 +220,8 @@ int RunNodeInstance(MultiIsolatePlatform* platform,
 ```
 
 [CLI options]: cli.md
+[Permission Model]: permissions.md#permission-model
+[`--allow-env`]: cli.md#--allow-env
 [`process.memoryUsage()`]: process.md#processmemoryusage
 [deprecation policy]: deprecations.md
 [embedtest.cc]: https://github.com/nodejs/node/blob/HEAD/test/embedding/embedtest.cc

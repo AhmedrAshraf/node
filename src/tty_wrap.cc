@@ -58,21 +58,27 @@ void TTYWrap::Initialize(Local<Object> target,
 
   Local<String> ttyString = FIXED_ONE_BYTE_STRING(env->isolate(), "TTY");
 
-  Local<FunctionTemplate> t = NewFunctionTemplate(isolate, New);
-  t->SetClassName(ttyString);
-  t->InstanceTemplate()->SetInternalFieldCount(StreamBase::kInternalFieldCount);
-  t->Inherit(LibuvStreamWrap::GetConstructorTemplate(env));
+  Local<FunctionTemplate> t = env->tty_constructor_template();
+  if (t.IsEmpty()) {
+    t = NewFunctionTemplate(isolate, New);
+    t->SetClassName(ttyString);
+    t->InstanceTemplate()->SetInternalFieldCount(TTYWrap::kInternalFieldCount);
+    t->Inherit(LibuvStreamWrap::GetConstructorTemplate(env));
 
-  SetProtoMethodNoSideEffect(
-      isolate, t, "getWindowSize", TTYWrap::GetWindowSize);
-  SetProtoMethod(isolate, t, "setRawMode", SetRawMode);
+    SetProtoMethodNoSideEffect(
+        isolate, t, "getWindowSize", TTYWrap::GetWindowSize);
+    SetProtoMethod(isolate, t, "setRawMode", SetRawMode);
+    env->set_tty_constructor_template(t);
+  }
 
   SetMethodNoSideEffect(context, target, "isTTY", IsTTY);
+  NODE_DEFINE_CONSTANT(target, UV_TTY_MODE_NORMAL);
+  NODE_DEFINE_CONSTANT(target, UV_TTY_MODE_IO);
+  NODE_DEFINE_CONSTANT(target, UV_TTY_MODE_RAW_VT);
 
   Local<Value> func;
-  if (t->GetFunction(context).ToLocal(&func) &&
-      target->Set(context, ttyString, func).IsJust()) {
-    env->set_tty_constructor_template(t);
+  if (t->GetFunction(context).ToLocal(&func)) {
+    target->Set(context, ttyString, func).Check();
   }
 }
 
@@ -91,9 +97,8 @@ void TTYWrap::GetWindowSize(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
 
   TTYWrap* wrap;
-  ASSIGN_OR_RETURN_UNWRAP(&wrap,
-                          args.Holder(),
-                          args.GetReturnValue().Set(UV_EBADF));
+  ASSIGN_OR_RETURN_UNWRAP(
+      &wrap, args.This(), args.GetReturnValue().Set(UV_EBADF));
   CHECK(args[0]->IsArray());
 
   int width, height;
@@ -101,8 +106,12 @@ void TTYWrap::GetWindowSize(const FunctionCallbackInfo<Value>& args) {
 
   if (err == 0) {
     Local<Array> a = args[0].As<Array>();
-    a->Set(env->context(), 0, Integer::New(env->isolate(), width)).Check();
-    a->Set(env->context(), 1, Integer::New(env->isolate(), height)).Check();
+    if (a->Set(env->context(), 0, Integer::New(env->isolate(), width))
+            .IsNothing() ||
+        a->Set(env->context(), 1, Integer::New(env->isolate(), height))
+            .IsNothing()) {
+      return;
+    }
   }
 
   args.GetReturnValue().Set(err);
@@ -111,10 +120,20 @@ void TTYWrap::GetWindowSize(const FunctionCallbackInfo<Value>& args) {
 
 void TTYWrap::SetRawMode(const FunctionCallbackInfo<Value>& args) {
   TTYWrap* wrap;
-  ASSIGN_OR_RETURN_UNWRAP(&wrap,
-                          args.Holder(),
-                          args.GetReturnValue().Set(UV_EBADF));
-  int err = uv_tty_set_mode(&wrap->handle_, args[0]->IsTrue());
+  ASSIGN_OR_RETURN_UNWRAP(
+      &wrap, args.This(), args.GetReturnValue().Set(UV_EBADF));
+  // UV_TTY_MODE_RAW_VT is a variant of UV_TTY_MODE_RAW that
+  // enables control sequence processing on the TTY implementer side,
+  // rather than having libuv translate keypress events into
+  // control sequences, aligning behavior more closely with
+  // POSIX platforms. This is also required to support some control
+  // sequences at all on Windows, such as bracketed paste mode.
+  // The Node.js readline implementation handles differences between
+  // these modes.
+  Environment* env = Environment::GetCurrent(args);
+  int mode;
+  if (!args[0]->Int32Value(env->context()).To(&mode)) return;
+  int err = uv_tty_set_mode(&wrap->handle_, static_cast<uv_tty_mode_t>(mode));
   args.GetReturnValue().Set(err);
 }
 
@@ -134,8 +153,7 @@ void TTYWrap::New(const FunctionCallbackInfo<Value>& args) {
   int err = 0;
   new TTYWrap(env, args.This(), fd, &err);
   if (err != 0) {
-    env->CollectUVExceptionInfo(args[1], err, "uv_tty_init");
-    args.GetReturnValue().SetUndefined();
+    USE(env->CollectUVExceptionInfo(args[1], err, "uv_tty_init"));
   }
 }
 

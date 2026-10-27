@@ -1,5 +1,4 @@
 #include <cstdio>
-#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -51,50 +50,87 @@ int main(int argc, char* argv[]) {
   setvbuf(stderr, nullptr, _IONBF, 0);
 #endif  // _WIN32
 
-  v8::V8::SetFlagsFromString("--random_seed=42");
-  v8::V8::SetFlagsFromString("--harmony-import-assertions");
   return BuildSnapshot(argc, argv);
 }
 
+static const char kBaseBlobFlag[] = "--v8-snapshot-blob=";
+
 int BuildSnapshot(int argc, char* argv[]) {
-  if (argc < 2) {
-    std::cerr << "Usage: " << argv[0] << " <path/to/output.cc>\n";
-    std::cerr << "       " << argv[0] << " --build-snapshot "
+  std::vector<std::string> args(argv, argv + argc);
+  // --v8-snapshot-blob=<file>: build on top of this V8 startup blob (for
+  // hosts whose V8 uses external startup data) instead of from scratch.
+  std::string base_blob_bytes;
+  v8::StartupData base_blob{nullptr, 0};
+  for (auto it = args.begin(); it != args.end(); ++it) {
+    if (it->starts_with(kBaseBlobFlag)) {
+      std::string path = it->substr(sizeof(kBaseBlobFlag) - 1);
+      args.erase(it);
+      if (node::ReadFileSync(path.c_str(), &base_blob_bytes) != 0) {
+        std::cerr << "Cannot read V8 snapshot blob " << path << "\n";
+        return 1;
+      }
+      base_blob = {base_blob_bytes.data(),
+                   static_cast<int>(base_blob_bytes.size())};
+      break;
+    }
+  }
+
+  if (args.size() < 2) {
+    std::cerr
+        << "Usage: " << argv[0]
+        << " [--v8-snapshot-blob=<path/to/blob.bin>] <path/to/output.cc>\n";
+    std::cerr << "       " << argv[0]
+              << " [--v8-snapshot-blob=<path/to/blob.bin>] --build-snapshot "
               << "<path/to/script.js> <path/to/output.cc>\n";
     return 1;
   }
 
-  std::unique_ptr<node::InitializationResult> result =
+  std::shared_ptr<node::InitializationResult> result =
       node::InitializeOncePerProcess(
-          std::vector<std::string>(argv, argv + argc));
+          args, node::ProcessInitializationFlags::kGeneratePredictableSnapshot);
+
+  if (result->exit_code() != 0) {
+    for (const std::string& error : result->errors()) {
+      std::cerr << error << "\n";
+    }
+    std::cerr << "node_mksnapshot failed with exit code " << result->exit_code()
+              << "\n";
+    return static_cast<int>(result->exit_code());
+  }
 
   CHECK(!result->early_return());
-  CHECK_EQ(result->exit_code(), 0);
 
   std::string out_path;
-  if (node::per_process::cli_options->build_snapshot) {
+  std::optional<std::string_view> builder_script_path = std::nullopt;
+  if (node::per_process::cli_options->per_isolate->build_snapshot) {
+    builder_script_path = result->args()[1];
     out_path = result->args()[2];
   } else {
     out_path = result->args()[1];
   }
 
-  std::ofstream out(out_path, std::ios::out | std::ios::binary);
-  if (!out) {
-    std::cerr << "Cannot open " << out_path << "\n";
-    return 1;
-  }
+#ifdef NODE_MKSNAPSHOT_USE_ARRAY_LITERALS
+  bool use_array_literals = true;
+#else
+  bool use_array_literals = false;
+#endif
 
-  node::ExitCode exit_code = node::ExitCode::kNoFailure;
-  {
-    exit_code = node::SnapshotBuilder::Generate(
-        out, result->args(), result->exec_args());
-    if (exit_code == node::ExitCode::kNoFailure) {
-      if (!out) {
-        std::cerr << "Failed to write " << out_path << "\n";
-        exit_code = node::ExitCode::kGenericUserError;
-      }
-    }
-  }
+  node::SnapshotConfig snapshot_config;
+  snapshot_config.builder_script_path = builder_script_path;
+  if (base_blob.data != nullptr) snapshot_config.base_blob = &base_blob;
+
+#ifdef NODE_USE_NODE_CODE_CACHE
+  snapshot_config.flags = node::SnapshotFlags::kDefault;
+#else
+  snapshot_config.flags = node::SnapshotFlags::kWithoutCodeCache;
+#endif
+
+  node::ExitCode exit_code =
+      node::SnapshotBuilder::GenerateAsSource(out_path.c_str(),
+                                              result->args(),
+                                              result->exec_args(),
+                                              snapshot_config,
+                                              use_array_literals);
 
   node::TearDownOncePerProcess();
   return static_cast<int>(exit_code);

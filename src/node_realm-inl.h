@@ -3,21 +3,26 @@
 
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
-#include "cleanup_queue-inl.h"
+#include "node_context_data.h"
 #include "node_realm.h"
+#include "util-inl.h"
 
 namespace node {
 
 inline Realm* Realm::GetCurrent(v8::Isolate* isolate) {
-  if (UNLIKELY(!isolate->InContext())) return nullptr;
+  if (!isolate->InContext()) [[unlikely]] {
+    return nullptr;
+  }
   v8::HandleScope handle_scope(isolate);
   return GetCurrent(isolate->GetCurrentContext());
 }
 
 inline Realm* Realm::GetCurrent(v8::Local<v8::Context> context) {
-  if (UNLIKELY(!ContextEmbedderTag::IsNodeContext(context))) return nullptr;
-  return static_cast<Realm*>(
-      context->GetAlignedPointerFromEmbedderData(ContextEmbedderIndex::kRealm));
+  if (!ContextEmbedderTag::IsNodeContext(context)) [[unlikely]] {
+    return nullptr;
+  }
+  return static_cast<Realm*>(context->GetAlignedPointerFromEmbedderData(
+      ContextEmbedderIndex::kRealm, EmbedderDataTag::kPerContextData));
 }
 
 inline Realm* Realm::GetCurrent(
@@ -30,6 +35,10 @@ inline Realm* Realm::GetCurrent(const v8::PropertyCallbackInfo<T>& info) {
   return GetCurrent(info.GetIsolate()->GetCurrentContext());
 }
 
+inline IsolateData* Realm::isolate_data() const {
+  return env_->isolate_data();
+}
+
 inline Environment* Realm::env() const {
   return env_;
 }
@@ -38,17 +47,76 @@ inline v8::Isolate* Realm::isolate() const {
   return isolate_;
 }
 
+inline v8::Local<v8::Context> Realm::context() const {
+  return PersistentToLocal::Strong(context_);
+}
+
+inline Realm::Kind Realm::kind() const {
+  return kind_;
+}
+
 inline bool Realm::has_run_bootstrapping_code() const {
   return has_run_bootstrapping_code_;
 }
 
-template <typename T>
-void Realm::ForEachBaseObject(T&& iterator) const {
-  cleanup_queue_.ForEachBaseObject(std::forward<T>(iterator));
+// static
+template <typename T, typename U>
+inline T* Realm::GetBindingData(const v8::PropertyCallbackInfo<U>& info) {
+  return GetBindingData<T>(info.GetIsolate()->GetCurrentContext());
 }
 
-void Realm::modify_base_object_count(int64_t delta) {
-  base_object_count_ += delta;
+// static
+template <typename T>
+inline T* Realm::GetBindingData(
+    const v8::FunctionCallbackInfo<v8::Value>& info) {
+  return GetBindingData<T>(info.GetIsolate()->GetCurrentContext());
+}
+
+// static
+template <typename T>
+inline T* Realm::GetBindingData(v8::Local<v8::Context> context) {
+  Realm* realm = GetCurrent(context);
+  return realm->GetBindingData<T>();
+}
+
+template <typename T>
+inline T* Realm::GetBindingData() {
+  constexpr size_t binding_index = static_cast<size_t>(T::binding_type_int);
+  static_assert(binding_index < std::tuple_size_v<BindingDataStore>);
+  auto ptr = binding_data_store_[binding_index];
+  if (!ptr) [[unlikely]] {
+    return nullptr;
+  }
+  T* result = static_cast<T*>(ptr.get());
+  DCHECK_NOT_NULL(result);
+  return result;
+}
+
+template <std::derived_from<BaseObject> T, typename... Args>
+inline T* Realm::AddBindingData(v8::Local<v8::Object> target, Args&&... args) {
+  // The binding data must be weak so that it won't keep the realm reachable
+  // from strong GC roots indefinitely. The wrapper object of binding data
+  // should be referenced from JavaScript, thus the binding data should be
+  // reachable throughout the lifetime of the realm.
+  BaseObjectWeakPtr<T> item =
+      MakeWeakBaseObject<T>(this, target, std::forward<Args>(args)...);
+  constexpr size_t binding_index = static_cast<size_t>(T::binding_type_int);
+  static_assert(binding_index < std::tuple_size_v<BindingDataStore>);
+  // Each slot is expected to be assigned only once.
+  CHECK(!binding_data_store_[binding_index]);
+  binding_data_store_[binding_index] = item;
+  return item.get();
+}
+
+inline BindingDataStore* Realm::binding_data_store() {
+  return &binding_data_store_;
+}
+
+template <typename T>
+void Realm::ForEachBaseObject(T&& iterator) const {
+  for (auto bo : base_object_list_) {
+    iterator(bo);
+  }
 }
 
 int64_t Realm::base_object_created_after_bootstrap() const {
@@ -59,30 +127,28 @@ int64_t Realm::base_object_count() const {
   return base_object_count_;
 }
 
-#define V(PropertyName, TypeName)                                              \
-  inline v8::Local<TypeName> Realm::PropertyName() const {                     \
-    return PersistentToLocal::Strong(PropertyName##_);                         \
-  }                                                                            \
-  inline void Realm::set_##PropertyName(v8::Local<TypeName> value) {           \
-    PropertyName##_.Reset(isolate(), value);                                   \
-  }
-PER_REALM_STRONG_PERSISTENT_VALUES(V)
-#undef V
-
-v8::Local<v8::Context> Realm::context() const {
-  return PersistentToLocal::Strong(context_);
+void Realm::TrackBaseObject(BaseObject* bo) {
+  DCHECK_EQ(bo->realm(), this);
+  base_object_list_.PushBack(bo);
+  ++base_object_count_;
 }
 
-void Realm::AddCleanupHook(CleanupQueue::Callback fn, void* arg) {
-  cleanup_queue_.Add(fn, arg);
+CppgcWrapperListNode::CppgcWrapperListNode(Realm* realm, CppgcMixin* wrapper)
+    : realm(realm), persistent(wrapper) {}
+
+CppgcWrapperListNode* Realm::TrackCppgcWrapper(CppgcMixin* handle) {
+  CppgcWrapperListNode* node = new CppgcWrapperListNode(this, handle);
+  cppgc_wrapper_list_.PushFront(node);
+  return node;
 }
 
-void Realm::RemoveCleanupHook(CleanupQueue::Callback fn, void* arg) {
-  cleanup_queue_.Remove(fn, arg);
+void Realm::UntrackBaseObject(BaseObject* bo) {
+  DCHECK_EQ(bo->realm(), this);
+  --base_object_count_;
 }
 
-bool Realm::HasCleanupHooks() const {
-  return !cleanup_queue_.empty();
+bool Realm::PendingCleanup() const {
+  return !base_object_list_.IsEmpty() || !cppgc_wrapper_list_.IsEmpty();
 }
 
 }  // namespace node

@@ -7,8 +7,10 @@ if (!common.hasCrypto)
 
 const {
   X509Certificate,
+  createHash,
   createPrivateKey,
   generateKeyPairSync,
+  createSign,
 } = require('crypto');
 
 const {
@@ -16,14 +18,42 @@ const {
 } = require('internal/crypto/x509');
 
 const assert = require('assert');
+const { spawnSync } = require('node:child_process');
 const fixtures = require('../common/fixtures');
+const { hasOpenSSL, isBoringSSL } = require('../common/crypto');
 const { readFileSync } = require('fs');
+const { checkServerIdentity } = require('tls');
 
 const cert = readFileSync(fixtures.path('keys', 'agent1-cert.pem'));
 const key = readFileSync(fixtures.path('keys', 'agent1-key.pem'));
 const ca = readFileSync(fixtures.path('keys', 'ca1-cert.pem'));
 
 const privateKey = createPrivateKey(key);
+
+if (!isBoringSSL) {
+  const expectedPubkeys = [
+    [
+      'rsa_pss_cert_2048.pem',
+      292,
+      'dff998a209bfa2e6ded1208c6e57f5b6bdedfa44b631265e3e244f38e637f6e4',
+    ],
+    [
+      'rsa_pss_cert_2048_sha256_sha256_16.pem',
+      342,
+      'da0bcd53fbe3969c7cc2730f86abc34e0e1c340264bbdfa3faf01484c2eeece0',
+    ],
+  ];
+
+  for (const [name, length, digest] of expectedPubkeys) {
+    const pssCert = new X509Certificate(
+      readFileSync(fixtures.path('keys', name)));
+    const pubkey = pssCert.toLegacyObject().pubkey;
+    assert.strictEqual(pubkey.length, length);
+    assert.strictEqual(
+      createHash('sha256').update(pubkey).digest('hex'),
+      digest);
+  }
+}
 
 [1, {}, false, null].forEach((i) => {
   assert.throws(() => new X509Certificate(i), {
@@ -49,7 +79,7 @@ emailAddress=ry@tinyclouds.org`;
 
 let infoAccessCheck = `OCSP - URI:http://ocsp.nodejs.org/
 CA Issuers - URI:http://ca.nodejs.org/ca.cert`;
-if (!common.hasOpenSSL3)
+if (isBoringSSL)
   infoAccessCheck += '\n';
 
 const der = Buffer.from(
@@ -83,6 +113,25 @@ const der = Buffer.from(
   '59c19ad1a00732e7adc851b89487cc00799dde068aa64b3b8fd976e8bc113ef2',
   'hex');
 
+for (const [commonName, property] of [
+  ['06035504030c03636131', 'issuer'],
+  ['06035504030c066167656e7431', 'subject'],
+]) {
+  const malformedNameDer = Buffer.from(der);
+  const commonNameEntry = Buffer.from(commonName, 'hex');
+  const commonNameOffset = malformedNameDer.indexOf(commonNameEntry);
+  assert.notStrictEqual(commonNameOffset, -1);
+
+  // Replace an issuer or subject commonName's UTF8String with a validly
+  // encoded BIT STRING, which ASN1_STRING_to_UTF8() cannot convert.
+  malformedNameDer[commonNameOffset + 5] = 0x03;
+  malformedNameDer[commonNameOffset + 7] = 0x00;
+
+  const malformedNameCert = new X509Certificate(malformedNameDer);
+  const legacy = malformedNameCert.toLegacyObject();
+  assert.strictEqual(Object.hasOwn(legacy[property], 'CN'), false);
+}
+
 {
   const x509 = new X509Certificate(cert);
 
@@ -110,9 +159,15 @@ const der = Buffer.from(
     '5A:42:63:E0:21:2F:D6:70:63:07:96:6F:27:A7:78:12:08:02:7A:8B'
   );
   assert.strictEqual(x509.keyUsage, undefined);
-  assert.strictEqual(x509.serialNumber, '147D36C1C2F74206DE9FAB5F2226D78ADB00A426');
+  assert.strictEqual(x509.serialNumber.toUpperCase(), '147D36C1C2F74206DE9FAB5F2226D78ADB00A426');
+
+  assert.strictEqual(x509.signatureAlgorithm, 'sha256WithRSAEncryption');
+  assert.strictEqual(x509.signatureAlgorithmOid, '1.2.840.113549.1.1.11');
 
   assert.deepStrictEqual(x509.raw, der);
+
+  assert.deepStrictEqual(x509.validFromDate, new Date('2022-09-03T21:40:37Z'));
+  assert.deepStrictEqual(x509.validToDate, new Date('2296-06-17T21:40:37Z'));
 
   assert(x509.publicKey);
   assert.strictEqual(x509.publicKey.type, 'public');
@@ -128,14 +183,32 @@ const der = Buffer.from(
 
   assert.strictEqual(x509.checkIP('127.0.0.1'), undefined);
   assert.strictEqual(x509.checkIP('::'), undefined);
-  assert.strictEqual(x509.checkHost('agent1'), 'agent1');
+  // OpenSSL 4.1 no longer checks the subject DN by default.
+  // https://github.com/openssl/openssl/pull/31982
+  for (const options of [undefined, { subject: 'default' }]) {
+    assert.strictEqual(x509.checkHost('agent1', options),
+                       hasOpenSSL(4, 1) ? undefined : 'agent1');
+    assert.strictEqual(x509.checkEmail('ry@tinyclouds.org', options),
+                       hasOpenSSL(4, 1) ? undefined : 'ry@tinyclouds.org');
+  }
+  assert.strictEqual(x509.checkHost('agent1', { subject: 'always' }), 'agent1');
+  assert.strictEqual(x509.checkHost('agent1', { subject: 'never' }), undefined);
   assert.strictEqual(x509.checkHost('agent2'), undefined);
-  assert.strictEqual(x509.checkEmail('ry@tinyclouds.org'), 'ry@tinyclouds.org');
+  assert.strictEqual(x509.checkEmail('ry@tinyclouds.org', { subject: 'always' }),
+                     'ry@tinyclouds.org');
+  assert.strictEqual(x509.checkEmail('ry@tinyclouds.org', { subject: 'never' }),
+                     undefined);
   assert.strictEqual(x509.checkEmail('sally@example.com'), undefined);
   assert.throws(() => x509.checkHost('agent\x001'), {
     code: 'ERR_INVALID_ARG_VALUE'
   });
   assert.throws(() => x509.checkIP('[::]'), {
+    code: 'ERR_INVALID_ARG_VALUE'
+  });
+  assert.throws(() => x509.checkIP('127.0.0.1\x00.example'), {
+    code: 'ERR_INVALID_ARG_VALUE'
+  });
+  assert.throws(() => x509.checkIP('fe80::1%eth0'), {
     code: 'ERR_INVALID_ARG_VALUE'
   });
   assert.throws(() => x509.checkEmail('not\x00hing'), {
@@ -190,7 +263,12 @@ const der = Buffer.from(
   {
     // https://github.com/nodejs/node/issues/45377
     // https://github.com/nodejs/node/issues/45485
-    // Confirm failures of X509Certificate:verify() and X509Certificate:CheckPrivateKey()
+    // Confirm failures of
+    // X509Certificate:verify()
+    // X509Certificate:CheckPrivateKey()
+    // X509Certificate:CheckCA()
+    // X509Certificate:CheckIssued()
+    // X509Certificate:ToLegacy()
     // do not affect other functions that use OpenSSL.
     // Subsequent calls to e.g. createPrivateKey should not throw.
     const keyPair = generateKeyPairSync('ed25519');
@@ -198,6 +276,44 @@ const der = Buffer.from(
     createPrivateKey(key);
     assert(!x509.checkPrivateKey(keyPair.privateKey));
     createPrivateKey(key);
+    const certPem = `
+-----BEGIN CERTIFICATE-----
+MIID6zCCAtOgAwIBAgIUTUREAaNcNL0zPkxAlMX0GJtJ/FcwDQYJKoZIhvcNAQEN
+BQAwgYkxCzAJBgNVBAYTAlVTMRMwEQYDVQQIDApDYWxpZm9ybmlhMREwDwYDVQQH
+DAhDYXJsc2JhZDEPMA0GA1UECgwGVmlhc2F0MR0wGwYDVQQLDBRWaWFzYXQgU2Vj
+dXJlIE1vYmlsZTEiMCAGA1UEAwwZSGFja2VyT25lIHJlcG9ydCAjMTgwODU5NjAi
+GA8yMDIyMTIxNjAwMDAwMFoYDzIwMjMxMjE1MjM1OTU5WjCBiTELMAkGA1UEBhMC
+VVMxEzARBgNVBAgMCkNhbGlmb3JuaWExETAPBgNVBAcMCENhcmxzYmFkMQ8wDQYD
+VQQKDAZWaWFzYXQxHTAbBgNVBAsMFFZpYXNhdCBTZWN1cmUgTW9iaWxlMSIwIAYD
+VQQDDBlIYWNrZXJPbmUgcmVwb3J0ICMxODA4NTk2MIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEA6I7RBPm4E/9rIrCHV5lfsHI/yYzXtACJmoyP8OMkjbeB
+h21oSJJF9FEnbivk6bYaHZIPasa+lSAydRM2rbbmfhF+jQoWYCIbV2ztrbFR70S1
+wAuJrlYYm+8u+1HUru5UBZWUr/p1gFtv3QjpA8+43iwE4pXytTBKPXFo1f5iZwGI
+D5Bz6DohT7Tyb8cpQ1uMCMCT0EJJ4n8wUrvfBgwBO94O4qlhs9vYgnDKepJDjptc
+uSuEpvHALO8+EYkQ7nkM4Xzl/WK1yFtxxE93Jvd1OvViDGVrRVfsq+xYTKknGLX0
+QIeoDDnIr0OjlYPd/cqyEgMcFyFxwDSzSc1esxdCpQIDAQABo0UwQzAdBgNVHQ4E
+FgQUurygsEKdtQk0T+sjM0gEURdveRUwEgYDVR0TAQH/BAgwBgEB/wIB/zAOBgNV
+HQ8BAf8EBAMCB4AwDQYJKoZIhvcNAQENBQADggEBAH7mIIXiQsQ4/QGNNFOQzTgP
+/bUbMSZJsY5TPAvS9rF9yQVzs4dJZnQk5kEb/qrDQSe27oP0L0hfFm1wTGy+aKfa
+BVGHdRmmvHtDUPLA9URCFShqKuS+GXp+6zt7dyZPRrPmiZaciiCMPHOnx59xSdPm
+AZG8cD3fmK2ThC4FAMyvRb0qeobka3s22xTQ2kjwJO5gykTkZ+BR6SzRHQTjYMuT
+iry9Bu8Kvbzu3r5n+/bmNz+xRNmEeehgT2qsHjA5b2YBVTr9MdN9Ro3H3saA3upr
+oans248kpal88CGqsN2so/wZKxVnpiXlPHMdiNL7hRSUqlHkUi07FrP2Htg8kjI=
+-----END CERTIFICATE-----`.trim();
+    const c = new X509Certificate(certPem);
+    assert(!c.ca);
+    const signer = createSign('SHA256');
+    assert(signer.sign(key, 'hex'));
+
+    const c1 = new X509Certificate(certPem);
+    assert(!c1.checkIssued(c1));
+    const signer1 = createSign('SHA256');
+    assert(signer1.sign(key, 'hex'));
+
+    const c2 = new X509Certificate(certPem);
+    assert(c2.toLegacyObject());
+    const signer2 = createSign('SHA256');
+    assert(signer2.sign(key, 'hex'));
   }
 
   // X509Certificate can be cloned via MessageChannel/MessagePort
@@ -209,9 +325,19 @@ const der = Buffer.from(
   });
   mc.port2.postMessage(x509);
 
+  const modulusOSSL = 'D456320AFB20D3827093DC2C4284ED04DFBABD56E1DDAE529E28B790CD42' +
+                      '56DB273349F3735FFD337C7A6363ECCA5A27B7F73DC7089A96C6D886DB0C' +
+                      '62388F1CDD6A963AFCD599D5800E587A11F908960F84ED50BA25A28303EC' +
+                      'DA6E684FBE7BAEDC9CE8801327B1697AF25097CEE3F175E400984C0DB6A8' +
+                      'EB87BE03B4CF94774BA56FFFC8C63C68D6ADEB60ABBE69A7B14AB6A6B9E7' +
+                      'BAA89B5ADAB8EB07897C07F6D4FA3D660DFF574107D28E8F63467A788624' +
+                      'C574197693E959CEA1362FFAE1BBA10C8C0D88840ABFEF103631B2E8F5C3' +
+                      '9B5548A7EA57E8A39F89291813F45A76C448033A2B7ED8403F4BAA147CF3' +
+                      '5E2D2554AA65CE49695797095BF4DC6B';
+
   // Verify that legacy encoding works
   const legacyObjectCheck = {
-    subject: Object.assign(Object.create(null), {
+    subject: Object.assign({ __proto__: null }, {
       C: 'US',
       ST: 'CA',
       L: 'SF',
@@ -220,7 +346,7 @@ const der = Buffer.from(
       CN: 'agent1',
       emailAddress: 'ry@tinyclouds.org',
     }),
-    issuer: Object.assign(Object.create(null), {
+    issuer: Object.assign({ __proto__: null }, {
       C: 'US',
       ST: 'CA',
       L: 'SF',
@@ -229,19 +355,11 @@ const der = Buffer.from(
       CN: 'ca1',
       emailAddress: 'ry@tinyclouds.org',
     }),
-    infoAccess: Object.assign(Object.create(null), {
+    infoAccess: Object.assign({ __proto__: null }, {
       'OCSP - URI': ['http://ocsp.nodejs.org/'],
       'CA Issuers - URI': ['http://ca.nodejs.org/ca.cert']
     }),
-    modulus: 'D456320AFB20D3827093DC2C4284ED04DFBABD56E1DDAE529E28B790CD42' +
-              '56DB273349F3735FFD337C7A6363ECCA5A27B7F73DC7089A96C6D886DB0C' +
-              '62388F1CDD6A963AFCD599D5800E587A11F908960F84ED50BA25A28303EC' +
-              'DA6E684FBE7BAEDC9CE8801327B1697AF25097CEE3F175E400984C0DB6A8' +
-              'EB87BE03B4CF94774BA56FFFC8C63C68D6ADEB60ABBE69A7B14AB6A6B9E7' +
-              'BAA89B5ADAB8EB07897C07F6D4FA3D660DFF574107D28E8F63467A788624' +
-              'C574197693E959CEA1362FFAE1BBA10C8C0D88840ABFEF103631B2E8F5C3' +
-              '9B5548A7EA57E8A39F89291813F45A76C448033A2B7ED8403F4BAA147CF3' +
-              '5E2D2554AA65CE49695797095BF4DC6B',
+    modulusPattern: new RegExp(`^${RegExp.escape(modulusOSSL)}$`, 'i'),
     bits: 2048,
     exponent: '0x10001',
     valid_from: 'Sep  3 21:40:37 2022 GMT',
@@ -254,7 +372,7 @@ const der = Buffer.from(
       '51:62:18:39:E2:E2:77:F5:86:11:E8:C0:CA:54:43:7C:76:83:19:05:D0:03:' +
       '24:21:B8:EB:14:61:FB:24:16:EB:BD:51:1A:17:91:04:30:03:EB:68:5F:DC:' +
       '86:E1:D1:7C:FB:AF:78:ED:63:5F:29:9C:32:AF:A1:8E:22:96:D1:02',
-    serialNumber: '147D36C1C2F74206DE9FAB5F2226D78ADB00A426'
+    serialNumberPattern: /^147D36C1C2F74206DE9FAB5F2226D78ADB00A426$/i
   };
 
   const legacyObject = x509.toLegacyObject();
@@ -263,7 +381,7 @@ const der = Buffer.from(
   assert.deepStrictEqual(legacyObject.subject, legacyObjectCheck.subject);
   assert.deepStrictEqual(legacyObject.issuer, legacyObjectCheck.issuer);
   assert.deepStrictEqual(legacyObject.infoAccess, legacyObjectCheck.infoAccess);
-  assert.strictEqual(legacyObject.modulus, legacyObjectCheck.modulus);
+  assert.match(legacyObject.modulus, legacyObjectCheck.modulusPattern);
   assert.strictEqual(legacyObject.bits, legacyObjectCheck.bits);
   assert.strictEqual(legacyObject.exponent, legacyObjectCheck.exponent);
   assert.strictEqual(legacyObject.valid_from, legacyObjectCheck.valid_from);
@@ -272,7 +390,261 @@ const der = Buffer.from(
   assert.strictEqual(
     legacyObject.fingerprint256,
     legacyObjectCheck.fingerprint256);
-  assert.strictEqual(
+  assert.match(
     legacyObject.serialNumber,
-    legacyObjectCheck.serialNumber);
+    legacyObjectCheck.serialNumberPattern);
+}
+
+if (!process.features.openssl_is_boringssl) {
+  // BoringSSL rejects certificates with malformed times during parsing. The
+  // formatter fallback is covered for all backends by the ncrypto cctest.
+  // ASN1_TIME_print() documents "Bad time value" as the representation of an
+  // invalid time. Ensure that detecting output errors does not discard it.
+  const invalidTimeDer = Buffer.from(der);
+  const validFromOffset = invalidTimeDer.indexOf('220903214037Z');
+  assert.notStrictEqual(validFromOffset, -1);
+  invalidTimeDer[validFromOffset + 2] = 0x31;
+  invalidTimeDer[validFromOffset + 3] = 0x33;
+
+  const invalidTimeCert = new X509Certificate(invalidTimeDer);
+  assert.strictEqual(invalidTimeCert.validFrom, 'Bad time value');
+  assert(Number.isNaN(invalidTimeCert.validFromDate.getTime()));
+  assert.strictEqual(
+    invalidTimeCert.toLegacyObject().valid_from,
+    'Bad time value');
+}
+
+{
+  // A malformed, present SAN must not look like an absent SAN in the legacy
+  // certificate object. Otherwise hostname verification can fall back to CN.
+  const sanCert = new X509Certificate(
+    readFileSync(fixtures.path('keys',
+                               'incorrect_san_correct_subject-cert.pem')));
+  const malformedSanDer = Buffer.from(sanCert.raw);
+  const sanSequence = Buffer.from('0603551d11041430', 'hex');
+  const sanOffset = malformedSanDer.indexOf(sanSequence);
+  assert.notStrictEqual(sanOffset, -1);
+  malformedSanDer[sanOffset + sanSequence.length - 1] = 0x31;
+
+  const malformedSanCert = new X509Certificate(malformedSanDer);
+  const expectedError = { code: 'ERR_CRYPTO_OPERATION_FAILED' };
+  assert.throws(() => malformedSanCert.subjectAltName, expectedError);
+
+  const legacyObject = malformedSanCert.toLegacyObject();
+  assert.strictEqual(legacyObject.subjectaltname, 'DNS:');
+  assert.strictEqual(
+    checkServerIdentity(legacyObject.subject.CN, legacyObject).code,
+    'ERR_TLS_CERT_ALTNAME_INVALID');
+
+  // GeneralNames is defined as a nonempty sequence. Some backends accept an
+  // empty sequence and ignore the remaining extension bytes, which must not
+  // make a present SAN look absent and permit commonName fallback.
+  const emptySanDer = Buffer.from(sanCert.raw);
+  emptySanDer[sanOffset + sanSequence.length] = 0;
+  const emptySanCert = new X509Certificate(emptySanDer);
+  assert.throws(() => emptySanCert.subjectAltName, expectedError);
+
+  const emptySanLegacyObject = emptySanCert.toLegacyObject();
+  assert.strictEqual(emptySanLegacyObject.subjectaltname, 'DNS:');
+  assert.strictEqual(
+    checkServerIdentity(
+      emptySanLegacyObject.subject.CN, emptySanLegacyObject).code,
+    'ERR_TLS_CERT_ALTNAME_INVALID');
+}
+
+{
+  // This X.509 Certificate can be parsed by OpenSSL because it contains a
+  // structurally sound TBSCertificate structure. However, the SPKI field of the
+  // TBSCertificate contains the subjectPublicKey as a BIT STRING, and this bit
+  // sequence is not a valid public key. Ensure that X509Certificate.publicKey
+  // does not abort in this case.
+
+  const certPem = `-----BEGIN CERTIFICATE-----
+MIIDpDCCAw0CFEc1OZ8g17q+PZnna3iQ/gfoZ7f3MA0GCSqGSIb3DQEBBQUAMIHX
+MRMwEQYLKwYBBAGCNzwCAQMTAkdJMR0wGwYDVQQPExRQcml2YXRlIE9yZ2FuaXph
+dGlvbjEOMAwGA1UEBRMFOTkxOTExCzAJBgNVBAYTAkdJMRIwEAYDVQQIFAlHaWJy
+YWx0YXIxEjAQBgNVBAcUCUdpYnJhbHRhcjEgMB4GA1UEChQXV0hHIChJbnRlcm5h
+dGlvbmFsKSBMdGQxHDAaBgNVBAsUE0ludGVyYWN0aXZlIEJldHRpbmcxHDAaBgNV
+BAMUE3d3dy53aWxsaWFtaGlsbC5jb20wIhgPMjAxNDAyMDcwMDAwMDBaGA8yMDE1
+MDIyMTIzNTk1OVowgbAxCzAJBgNVBAYTAklUMQ0wCwYDVQQIEwRSb21lMRAwDgYD
+VQQHEwdQb21lemlhMRYwFAYDVQQKEw1UZWxlY29taXRhbGlhMRIwEAYDVQQrEwlB
+RE0uQVAuUE0xHTAbBgNVBAMTFHd3dy50ZWxlY29taXRhbGlhLml0MTUwMwYJKoZI
+hvcNAQkBFiZ2YXNlc2VyY2l6aW9wb3J0YWxpY29AdGVsZWNvbWl0YWxpYS5pdDCB
+nzANBgkqhkiG9w0BAQEFAAOBjQA4gYkCgYEA5m/Vf7PevH+inMfUJOc8GeR7WVhM
+CQwcMM5k46MSZo7kCk7VZuaq5G2JHGAGnLPaPUkeXlrf5qLpTxXXxHNtz+WrDlFt
+boAdnTcqpX3+72uBGOaT6Wi/9YRKuCs5D5/cAxAc3XjHfpRXMoXObj9Vy7mLndfV
+/wsnTfU9QVeBkgsCAwEAAaOBkjCBjzAdBgNVHQ4EFgQUfLjAjEiC83A+NupGrx5+
+Qe6nhRMwbgYIKwYBBQUHAQwEYjBgoV6gXDBaMFgwVhYJaW1hZ2UvZ2lmMCEwHzAH
+BgUrDgMCGgQUS2u5KJYGDLvQUjibKaxLB4shBRgwJhYkaHR0cDovL2xvZ28udmVy
+aXNpZ24uY29tL3ZzbG9nbzEuZ2lmMA0GCSqGSIb3DQEBBQUAA4GBALLiAMX0cIMp
++V/JgMRhMEUKbrt5lYKfv9dil/f22ezZaFafb070jGMMPVy9O3/PavDOkHtTv3vd
+tAt3hIKFD1bJt6c6WtMH2Su3syosWxmdmGk5ihslB00lvLpfj/wed8i3bkcB1doq
+UcXd/5qu2GhokrKU2cPttU+XAN2Om6a0
+-----END CERTIFICATE-----`;
+
+  if (!isBoringSSL) {
+    const cert = new X509Certificate(certPem);
+
+    // Run the legacy conversion in a child so a native regression is reported
+    // as a signal rather than terminating the test runner.
+    const child = spawnSync(process.execPath, [
+      '-e',
+      `
+        'use strict';
+        const assert = require('node:assert');
+        const { X509Certificate } = require('node:crypto');
+        const cert = new X509Certificate(process.argv[1]);
+        const legacy = cert.toLegacyObject();
+        assert.strictEqual(legacy.modulus, undefined);
+        assert.strictEqual(legacy.exponent, undefined);
+        assert.strictEqual(legacy.pubkey, undefined);
+      `,
+      '--',
+      certPem,
+    ], {
+      encoding: 'utf8',
+    });
+    assert.strictEqual(child.signal, null, child.stderr || child.stdout);
+    assert.strictEqual(child.status, 0, child.stderr || child.stdout);
+
+    assert.throws(() => cert.publicKey, {
+      message: /decode error/,
+      name: 'Error'
+    });
+
+    assert.strictEqual(cert.checkIssued(cert), false);
+  }
+}
+
+{
+  // Test date parsing of `validFromDate` and `validToDate` fields, according to RFC 5280.
+
+  // Validity dates up until the year 2049 are encoded as UTCTime.
+  // The formatting of UTCTime changes from the year ~1949 to 1950~.
+  const certPemUTCTime = `-----BEGIN CERTIFICATE-----
+MIIE/TCCAuWgAwIBAgIUHbXPaFnjeBehMvdHkXZ+E3a78QswDQYJKoZIhvcNAQEL
+BQAwDTELMAkGA1UEBhMCS1IwIBgPMTk0OTEyMjUyMzU5NThaFw01MDAxMDEyMzU5
+NThaMA0xCzAJBgNVBAYTAktSMIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKC
+AgEAtFfV2DB2dZFFaR1PPZMmyo0mSDAxGReoixxlhQTFZZymU71emWV/6gR8MxAE
+L5+uzpgBvOZWgEbELWeV/gzZGU/x1Cki0dSJ0B8Qwr5HvKX6oOZrJ8t+wn4SRceq
+r6MRPskDpTjnvelt+VURGmawtKKHll5fSqfjRWkQC8WQHdogXylRjd3oIh9p1D5P
+hphK/jKddxsRkLhJKQWqTjAy2v8hsJAxvpCPnlqMCXxjbQV41UTY8+kY3RPG3d6c
+yHBGM7dzM7XWVc79V9z/rjdRcxE2eBqrJT/yR3Cok8wWVVfQEgBfpolHUZxA8K4N
+tubTez9zsJy7xUG7udf91wXWVHMBHXg6m/u5nIW0fAXGMtnG/H6FMyyBDbJoUlqm
+VRTG71DzvBXpd/qx2P5LkU1JjWY3U8HSn6Q1DJzMIrbOmWpdlFYXxzLlXU2vG8Q3
+PmdAHDDYW3M2YBVCdKqOtsuL2dMDuqRWdi3iCCPSR2UCm4HzAVYSe2FP8SPcY3xs
+1NX+oDSpTxXruJYHGUp10/pXoqMrGT1IBgv2Dhsm3jcfRLSXkaBDJIKLO6dXmLBt
+rlxM0DphiKnP6lDjpv7EDMdwsakz0zib3JrTmSLSbwZXR4abITmtbYbTpY3XAq7c
+adO8YCMTCtb50ZbYEpGDAjOcWFHUlQQMsgZM2zc8ZHPY4EkCAwEAAaNTMFEwHQYD
+VR0OBBYEFExDmZyzdo8ccjX7iFIwU7JYMV+qMB8GA1UdIwQYMBaAFExDmZyzdo8c
+cjX7iFIwU7JYMV+qMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggIB
+ADEF/JIH+Ku9NqrO47Q/CEn9qpIgmqX10d1joDjchPY3OHIIyt8Xpo845mPBTM7L
+dnMJSlkzJEk0ep9qAGGdKpBnLq8B/1mgCWQ81jwrwdYSsY+4xark+7+y0fij6qAt
+L4T6aA37nbV5q5/DMOwZucFwRTf9ZI1IjC+MaQmnV01vGCogqqfLQ9v26bVBRE1K
+UIixH0r3f/LWtuo0KaebZbb+oq6Zb8ljKJaUlt5OB8Zy5NrcP69r29QJUR57ukT6
+rt7fk5mOj2NBLMCErLHa7E6+GAUG94QEgdKzZ4yr2aduhMAfnOnK/HfuXO8TVa8/
++oYENr47M8x139+yu92C8Be1MRk0VHteBaScUL+IaY3HgGbYR1lT0azvIyBN/DCN
+bYczI7JQGYVitLuaUYFw/RtK7Qg1957/ZmGeGa+86aTLXbqsGjI951D81EIzdqod
+1QW/Jn3yMNeVIzF9eYVEy2DIJjGgM2A8NWbqfWGUAUMRgyTxH1j42tnWG3eRnMsX
+UnQfpY8i3v6gYoNNgEZktrqgpmukTWgl08TlDtBCjXTBkcBt4dxDApeoy7XWKq+/
+qBY/+uIsG30BRgJhAwApjdnCs7l5xpwtqluXFwOxyTWNV5IfChO7QFqWPlSVIHML
+UidvpWWipVLZgK+oDks+bKTobcoXGW9oXobiIYqslXPy
+-----END CERTIFICATE-----`.trim();
+  const c1 = new X509Certificate(certPemUTCTime);
+
+  assert.deepStrictEqual(c1.validFromDate, new Date('1949-12-25T23:59:58Z'));
+  assert.deepStrictEqual(c1.validToDate, new Date('1950-01-01T23:59:58Z'));
+
+  // The GeneralizedTime format is used for dates in 2050 or later.
+  const certPemGeneralizedTime = `-----BEGIN CERTIFICATE-----
+MIIE/TCCAuWgAwIBAgIUYHPUNd6S5xlNMjrWSaekgCBrbDQwDQYJKoZIhvcNAQEL
+BQAwDTELMAkGA1UEBhMCS1IwIBcNNDkxMjI2MDAwMDAxWhgPMjA1MDAxMDIwMDAw
+MDFaMA0xCzAJBgNVBAYTAktSMIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKC
+AgEAlBPjQXHTzQWflvq6Lc01E0gVSSUQd5XnfK9K8TEN8ic/6iJVBWK8OwTmwh6u
+KdSO+DrTpoTA3Wo4T7oSL89xsyJN5JHiIT2VdZvgcXkv+ZL+rZ2INzYSSXbPQ8V+
+Md5A7tNWGJOvneD1Pb+AKrVXn6N1+xiKuv08U+d6ZCcv8P2cGUJCQr5BSg6eXPm2
+ZIoFhNLDaqleci0P/Bs7uMwKjVr2IP99bCMwTS2STxexEmYf4J3wgNXBOHxspLcS
+p7Yt3JgezvzRn5kijQi7ceS24q/fsGCCwB706mOKdYLCfEL1DhhEr27+XICw7zOF
+Q8tSe33IfSdxejEVV+lf/jGW5zFH5m+lDTJC0VAUCBG5E7q57yFaoQ44CQWtbMHZ
++dtodKx4B0lzWXJs8xkGo0rl9/1CuY2iPX3lB6xxlX50ruj8stccMwarRzUvfkjw
+AhnbUs9X1ooFyVXmVYXWzR0gP1/q05Zob03khX1NipGbMf0RBI4WlItkiRsrEl9x
+08YPbrUyd7JnFkgG0O5TcmTzHr9cTJHg5BzclQA9/V0HuslSVOkKMMlKHky2zcqY
+dDBmWtfTrvowaB7hTGD6YK4R9JCDUy7oeeK4ZUxRNCnJY698HodE9lQu+F0cJpbY
+uZExFapE/AWA8ftlw2/fXoK0L3DhYsOVQkHd2YbrvzZEHVMCAwEAAaNTMFEwHQYD
+VR0OBBYEFNptaIzozylFlD0+JKULue+5gvfZMB8GA1UdIwQYMBaAFNptaIzozylF
+lD0+JKULue+5gvfZMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggIB
+AFXP4SCP6VFMINaKE/rLJOaFiVVuS4qDfpGRjuBryNxey4ErBFsXcPi/D0LIsNkb
+c3qsex1cJadZdg3sqdkyliyYgzjJn1fSsiPT8GMiMnckw9awIwqtucGf+6SPdL6o
+9jp0xg6KsRHWjN0GetCz89hy9HwSiSwiLpTxVYOMLjQ+ey8KXPk0LNaXve/++hrr
+gN+cvcPKkspAE5SMTSKqHwVUD4MRJgdQqYDqB6demCq9Yl+kyQg9gVnuzkpKeNBT
+qNVeeA6gczCpYV4rUMqT0UVVPbPOcygwZP2o7tUyNk6fmYzyLpi5R+FYD/PoowFp
+LOrIaG426QaXhLr4U0i+HD/LhHZ4AWWt0OYAvbkk/xrhmagUcyeOxUrcYl6tA3NQ
+sjPV2FNGitX+zOyxfMxcjf0RpaBbyMsO6DSfQidDchFvPR9VFX4THs/0mP02IK27
+MpsZj8AG2/jjPz6ytnWBJGuLeIt2sWnluZyldX+V9QEEhEmrEweUolacKF5ESODG
+SHyZZVSUCK0bJfDfk5rXCQokWCIe+jHbW3CSWWmBRz6blZDeO/wI8nN4TWHDMCu6
+lawls1QdAwfP4CWIq4T7gsn/YqxMs74zDCXIF0tfuPmw5FMeCYVgnXQ7et8HBfeE
+CWwQO8JZjJqFtqtuzy2n+gLCvqePgG/gmSqHOPm2ZbLW
+-----END CERTIFICATE-----`.trim();
+  const c2 = new X509Certificate(certPemGeneralizedTime);
+
+  assert.deepStrictEqual(c2.validFromDate, new Date('2049-12-26T00:00:01Z'));
+  assert.deepStrictEqual(c2.validToDate, new Date('2050-01-02T00:00:01Z'));
+}
+
+{
+  const certPem = `-----BEGIN CERTIFICATE-----
+MIGXMHugAwIBAgIBATANBgkrBgEEAYaNHwEFADASMRAwDgYDVQQDEwdVbmtub3du
+MB4XDTI0MDEwMTAwMDAwMFoXDTM0MDEwMTAwMDAwMFowEjEQMA4GA1UEAxMHVW5r
+bm93bjAaMA0GCSqGSIb3DQEBAQUAAwkAAAAAAAAAAAAwDQYJKwYBBAGGjR8BBQAD
+CQAAAAAAAAAAAA==
+-----END CERTIFICATE-----`;
+
+  const cert = new X509Certificate(certPem);
+
+  assert.strictEqual(cert.signatureAlgorithm, undefined);
+  assert.strictEqual(cert.signatureAlgorithmOid, '1.3.6.1.4.1.99999.1');
+}
+
+if (!isBoringSSL) {
+  // EC certificate on a curve without a NIST name (brainpoolP256r1).
+  const certPem = `-----BEGIN CERTIFICATE-----
+MIIBfzCCASagAwIBAgIUcZKohGvML9PeBwQtylddAdUU3nkwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJYnJhaW5wb29sMCAXDTI2MTAxMjE0NDczMVoYDzIxMjYwOTE4
+MTQ0NzMxWjAUMRIwEAYDVQQDDAlicmFpbnBvb2wwWjAUBgcqhkjOPQIBBgkrJAMD
+AggBAQcDQgAEKnP14jKQEUyWxWhXrs+ql7OlMy0EW3mnYTvwkF8VyYsPB9dBUJOW
+8IHqIik0kjQVSVhtLH0j+hveyZvGd0aQq6NTMFEwHQYDVR0OBBYEFNx4uQEsAiNZ
+zcrKuAZ9/9d1eIeDMB8GA1UdIwQYMBaAFNx4uQEsAiNZzcrKuAZ9/9d1eIeDMA8G
+A1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAwRAIgHc4TOjOLOPXrvWXRQ44L
+jEVmV959vS0DtFIIsrGT3moCIBBRZWdLdd0YjFHUQshMZFM9BN2INpjFNUUxqPAC
+3qPo
+-----END CERTIFICATE-----`;
+
+  const legacyObject = new X509Certificate(certPem).toLegacyObject();
+  assert.ok([undefined, 'brainpoolP256r1'].includes(legacyObject.asn1Curve));
+  assert.strictEqual(legacyObject.nistCurve, undefined);
+}
+
+if (!process.features.openssl_is_boringssl) {
+  const certPem = `-----BEGIN CERTIFICATE-----
+MIIBfTCCASSgAwIBAgIUFOenmg/rEU9h3dVqmBzP84ckpbQwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJYnJhaW5wb29sMB4XDTI2MDYzMDA5MDcwOFoXDTI2MDcwMTA5
+MDcwOFowFDESMBAGA1UEAwwJYnJhaW5wb29sMFowFAYHKoZIzj0CAQYJKyQDAwII
+AQEHA0IABDhDrr79NVJtx/sOq9RiCoGWvuiUucpciBG7gET/H9gDKrlMsftC5KZb
+vlseseOxYj8ZCNXmTaZTlC4Wz9JbEeqjUzBRMB0GA1UdDgQWBBSQRbtKt7fEeMAw
+3jQGNmxiAS/GozAfBgNVHSMEGDAWgBSQRbtKt7fEeMAw3jQGNmxiAS/GozAPBgNV
+HRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0cAMEQCIC76KvKG0WuIC69kvqgqwtnJ
+sMTBCid+5zWH7ZLmWxeVAiAnZF9MSUgCGN7Nw4L7uo63vacwZQrNN3vOS/F7eqUY
+wg==
+-----END CERTIFICATE-----`;
+
+  const cert = new X509Certificate(certPem);
+  const legacyObject = cert.toLegacyObject();
+
+  assert.strictEqual(legacyObject.subject.CN, 'brainpool');
+  assert.strictEqual(legacyObject.nistCurve, undefined);
+  // This can either be resolved correctly or not (and not crash)
+  // depending on the OpenSSL version and FIPS state
+  assert.ok(legacyObject.pubkey === undefined || Buffer.isBuffer(legacyObject.pubkey));
+  assert.ok([undefined, 'brainpoolP256r1'].includes(legacyObject.asn1Curve));
+  assert.ok([undefined, 256].includes(legacyObject.bits));
 }

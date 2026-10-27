@@ -1,5 +1,12 @@
 import { owner_symbol } from './symbols';
 
+export interface AsyncWrap {
+  getAsyncId(): number;
+  asyncReset(resource: object, executionAsyncId?: number): void;
+  getAsyncContextFrameForDebuggingOnly(): unknown;
+  getProviderType(): number;
+}
+
 declare namespace InternalAsyncWrapBinding {
   interface Resource {
     [owner_symbol]?: PublicResource;
@@ -68,11 +75,10 @@ declare namespace InternalAsyncWrapBinding {
     SIGNREQUEST: 54;
     TLSWRAP: 55;
     VERIFYREQUEST: 56;
-    INSPECTORJSBINDING: 57;
   }
 }
 
-declare function InternalBinding(binding: 'async_wrap'): {
+export interface AsyncWrapBinding {
   setupHooks(): {
     init: (
       asyncId: number,
@@ -129,4 +135,4 @@ declare function InternalBinding(binding: 'async_wrap'): {
     kDefaultTriggerAsyncId: 3;
   };
   Providers: InternalAsyncWrapBinding.Providers;
-};
+}

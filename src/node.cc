@@ -20,6 +20,9 @@
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "node.h"
+#include "node_config_file.h"
+#include "node_dotenv.h"
+#include "node_task_runner.h"
 
 // ========== local headers ==========
 
@@ -39,12 +42,20 @@
 #include "node_realm-inl.h"
 #include "node_report.h"
 #include "node_revert.h"
+#include "node_sea.h"
 #include "node_snapshot_builder.h"
 #include "node_v8_platform-inl.h"
 #include "node_version.h"
+#include "permission/env_permission.h"
 
 #if HAVE_OPENSSL
+#include "ncrypto.h"
 #include "node_crypto.h"
+#if !defined(OPENSSL_IS_BORINGSSL) && !defined(CONF_MFLAGS_IGNORE_MISSING_FILE)
+// OpenSSL hides this deprecated macro under OPENSSL_NO_DEPRECATED, but the
+// non-deprecated OPENSSL_INIT settings API still accepts the flag value.
+#define CONF_MFLAGS_IGNORE_MISSING_FILE 0x10
+#endif
 #endif
 
 #if defined(NODE_HAVE_I18N_SUPPORT)
@@ -61,15 +72,15 @@
 #endif  // NODE_USE_V8_PLATFORM
 #include "v8-profiler.h"
 
+#include "cppgc/platform.h"
+
 #if HAVE_INSPECTOR
 #include "inspector/worker_inspector.h"  // ParentInspectorHandle
 #endif
 
 #ifdef NODE_ENABLE_VTUNE_PROFILING
-#include "../deps/v8/src/third_party/vtune/v8-vtune.h"
+#include "../deps/v8/third_party/vtune/v8-vtune.h"
 #endif
-
-#include "large_pages/node_large_page.h"
 
 #if defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
 #define NODE_USE_V8_WASM_TRAP_HANDLER 1
@@ -112,6 +123,8 @@
 #include <unistd.h>        // STDIN_FILENO, STDERR_FILENO
 #endif
 
+#include "absl/synchronization/mutex.h"
+
 // ========== global C++ headers ==========
 
 #include <cerrno>
@@ -122,13 +135,15 @@
 #include <cstring>
 
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace node {
 
-using builtins::BuiltinLoader;
-
+using v8::Array;
+using v8::Context;
 using v8::EscapableHandleScope;
+using v8::Function;
 using v8::Isolate;
 using v8::Local;
 using v8::MaybeLocal;
@@ -137,6 +152,13 @@ using v8::V8;
 using v8::Value;
 
 namespace per_process {
+
+// node_dotenv.h
+// Instance is used to store environment variables including NODE_OPTIONS.
+node::Dotenv dotenv_file = Dotenv();
+
+// node_config_file.h
+node::ConfigReader config_reader = ConfigReader();
 
 // node_revert.h
 // Bit flag used to track security reverts.
@@ -194,7 +216,17 @@ void Environment::InitializeInspector(
     return;
   }
 
+  if (should_wait_for_inspector_frontend()) {
+    WaitForInspectorFrontendByOptions();
+  }
+
   profiler::StartProfilers(this);
+}
+
+void Environment::WaitForInspectorFrontendByOptions() {
+  if (!inspector_agent_->WaitForConnectByOptions()) {
+    return;
+  }
 
   if (inspector_agent_->options().break_node_first_line) {
     inspector_agent_->PauseOnNextJavascriptStatement("Break at bootstrap");
@@ -204,44 +236,6 @@ void Environment::InitializeInspector(
 }
 #endif  // HAVE_INSPECTOR
 
-#define ATOMIC_WAIT_EVENTS(V)                                               \
-  V(kStartWait,           "started")                                        \
-  V(kWokenUp,             "was woken up by another thread")                 \
-  V(kTimedOut,            "timed out")                                      \
-  V(kTerminatedExecution, "was stopped by terminated execution")            \
-  V(kAPIStopped,          "was stopped through the embedder API")           \
-  V(kNotEqual,            "did not wait because the values mismatched")     \
-
-static void AtomicsWaitCallback(Isolate::AtomicsWaitEvent event,
-                                Local<v8::SharedArrayBuffer> array_buffer,
-                                size_t offset_in_bytes, int64_t value,
-                                double timeout_in_ms,
-                                Isolate::AtomicsWaitWakeHandle* stop_handle,
-                                void* data) {
-  Environment* env = static_cast<Environment*>(data);
-
-  const char* message = "(unknown event)";
-  switch (event) {
-#define V(key, msg)                         \
-    case Isolate::AtomicsWaitEvent::key:    \
-      message = msg;                        \
-      break;
-    ATOMIC_WAIT_EVENTS(V)
-#undef V
-  }
-
-  fprintf(stderr,
-          "(node:%d) [Thread %" PRIu64 "] Atomics.wait(%p + %zx, %" PRId64
-          ", %.f) %s\n",
-          static_cast<int>(uv_os_getpid()),
-          env->thread_id(),
-          array_buffer->Data(),
-          offset_in_bytes,
-          value,
-          timeout_in_ms,
-          message);
-}
-
 void Environment::InitializeDiagnostics() {
   isolate_->GetHeapProfiler()->AddBuildEmbedderGraphCallback(
       Environment::BuildEmbedderGraph, this);
@@ -250,12 +244,8 @@ void Environment::InitializeDiagnostics() {
   }
   if (options_->trace_uncaught)
     isolate_->SetCaptureStackTraceForUncaughtExceptions(true);
-  if (options_->trace_atomics_wait) {
-    isolate_->SetAtomicsWaitCallback(AtomicsWaitCallback, this);
-    AddCleanupHook([](void* data) {
-      Environment* env = static_cast<Environment*>(data);
-      env->isolate()->SetAtomicsWaitCallback(nullptr, nullptr);
-    }, this);
+  if (options_->trace_promises) {
+    isolate_->SetPromiseHook(TracePromises);
   }
 }
 
@@ -268,24 +258,90 @@ MaybeLocal<Value> StartExecution(Environment* env, const char* main_script_id) {
   return scope.EscapeMaybe(realm->ExecuteBootstrapper(main_script_id));
 }
 
-MaybeLocal<Value> StartExecution(Environment* env, StartExecutionCallback cb) {
+// Convert the result returned by an intermediate main script into
+// StartExecutionCallbackInfoWithModule. Currently the result is an array
+// containing [process, requireFunction, runModule].
+std::optional<StartExecutionCallbackInfoWithModule> CallbackInfoFromArray(
+    Environment* env, Local<Value> result) {
+  CHECK(result->IsArray());
+  Local<Array> args = result.As<Array>();
+  CHECK_EQ(args->Length(), 3);
+  Local<Value> process_obj, require_fn, run_module;
+  Local<Context> context = env->context();
+  if (!args->Get(context, 0).ToLocal(&process_obj) ||
+      !args->Get(context, 1).ToLocal(&require_fn) ||
+      !args->Get(context, 2).ToLocal(&run_module)) {
+    return std::nullopt;
+  }
+  CHECK(process_obj->IsObject());
+  CHECK(require_fn->IsFunction());
+  CHECK(run_module->IsFunction());
+  StartExecutionCallbackInfoWithModule info;
+  info.set_env(env);
+  info.set_process_object(process_obj.As<Object>());
+  info.set_native_require(require_fn.As<Function>());
+  info.set_run_module(run_module.As<Function>());
+  return info;
+}
+
+MaybeLocal<Value> StartExecution(Environment* env,
+                                 StartExecutionCallbackWithModule cb) {
   InternalCallbackScope callback_scope(
       env,
       Object::New(env->isolate()),
       { 1, 0 },
       InternalCallbackScope::kSkipAsyncHooks);
 
-  if (cb != nullptr) {
+  // Only snapshot builder or embedder applications set the
+  // callback.
+  if (cb) {
     EscapableHandleScope scope(env->isolate());
 
-    if (StartExecution(env, "internal/main/environment").IsEmpty()) return {};
+    Local<Value> result;
+    if (env->isolate_data()->is_building_snapshot()) {
+      if (!StartExecution(env, "internal/main/mksnapshot").ToLocal(&result)) {
+        return MaybeLocal<Value>();
+      }
+    } else {
+      if (!StartExecution(env, "internal/main/embedding").ToLocal(&result)) {
+        return MaybeLocal<Value>();
+      }
+    }
 
-    StartExecutionCallbackInfo info = {
-        env->process_object(),
-        env->builtin_module_require(),
-    };
+    auto info = CallbackInfoFromArray(env, result);
+    if (!info.has_value()) {
+      return MaybeLocal<Value>();
+    }
+#if HAVE_INSPECTOR
+    if (env->options()->debug_options().break_first_line) {
+      env->inspector_agent()->PauseOnNextJavascriptStatement("Break on start");
+    }
+#endif
 
-    return scope.EscapeMaybe(cb(info));
+    env->performance_state()->Mark(
+        performance::NODE_PERFORMANCE_MILESTONE_BOOTSTRAP_COMPLETE);
+    return scope.EscapeMaybe(cb(info.value()));
+  }
+
+  CHECK(!env->isolate_data()->is_building_snapshot());
+
+#ifndef DISABLE_SINGLE_EXECUTABLE_APPLICATION
+  // Snapshot in SEA is only loaded for the main thread.
+  if (sea::IsSingleExecutable() && env->is_main_thread()) {
+    const sea::SeaResource& sea = sea::FindSingleExecutableResource();
+    // The SEA preparation blob building process should already enforce this,
+    // this check is just here to guard against the unlikely case where
+    // the SEA preparation blob has been manually modified by someone.
+    CHECK_IMPLIES(sea.use_snapshot(),
+                  !env->snapshot_deserialize_main().IsEmpty());
+  }
+#endif
+
+  // Ignore env file if we're in watch mode.
+  // Without it env is not updated when restarting child process.
+  // Child process has --watch flag removed, so it will load the file.
+  if (env->options()->has_env_file_string && !env->options()->watch_mode) {
+    per_process::dotenv_file.SetEnvironment(env);
   }
 
   // TODO(joyeecheung): move these conditions into JS land and let the
@@ -293,6 +349,9 @@ MaybeLocal<Value> StartExecution(Environment* env, StartExecutionCallback cb) {
   // move the pre-execution part into a different file that can be
   // reused when dealing with user-defined main functions.
   if (!env->snapshot_deserialize_main().IsEmpty()) {
+    // Custom worker snapshot is not supported yet,
+    // so workers can't have deserialize main functions.
+    CHECK(env->is_main_thread());
     return env->RunSnapshotDeserializeMain();
   }
 
@@ -309,14 +368,9 @@ MaybeLocal<Value> StartExecution(Environment* env, StartExecutionCallback cb) {
     return StartExecution(env, "internal/main/inspect");
   }
 
-  if (per_process::cli_options->build_snapshot) {
-    return StartExecution(env, "internal/main/mksnapshot");
-  }
-
   if (per_process::cli_options->print_help) {
     return StartExecution(env, "internal/main/print_help");
   }
-
 
   if (env->options()->prof_process) {
     return StartExecution(env, "internal/main/prof_process");
@@ -331,6 +385,10 @@ MaybeLocal<Value> StartExecution(Environment* env, StartExecutionCallback cb) {
     return StartExecution(env, "internal/main/check_syntax");
   }
 
+  if (env->options()->bench_runner) {
+    return StartExecution(env, "internal/main/bench_runner");
+  }
+
   if (env->options()->test_runner) {
     return StartExecution(env, "internal/main/test_runner");
   }
@@ -339,7 +397,10 @@ MaybeLocal<Value> StartExecution(Environment* env, StartExecutionCallback cb) {
     return StartExecution(env, "internal/main/watch_mode");
   }
 
-  if (!first_argv.empty() && first_argv != "-") {
+  // --vfs-load takes the entry point from the source it names, mounted in
+  // prepareExecution(), so route to run_main_module even with no positional
+  // argument rather than falling through to the REPL/stdin.
+  if ((!first_argv.empty() && first_argv != "-") || env->options()->vfs_load) {
     return StartExecution(env, "internal/main/run_main_module");
   }
 
@@ -354,8 +415,9 @@ MaybeLocal<Value> StartExecution(Environment* env, StartExecutionCallback cb) {
 typedef void (*sigaction_cb)(int signo, siginfo_t* info, void* ucontext);
 #endif
 #if NODE_USE_V8_WASM_TRAP_HANDLER
+static std::atomic<bool> is_wasm_trap_handler_configured{false};
 #if defined(_WIN32)
-static LONG TrapWebAssemblyOrContinue(EXCEPTION_POINTERS* exception) {
+static LONG WINAPI TrapWebAssemblyOrContinue(EXCEPTION_POINTERS* exception) {
   if (v8::TryHandleWebAssemblyTrapWindows(exception)) {
     return EXCEPTION_CONTINUE_EXECUTION;
   }
@@ -363,10 +425,19 @@ static LONG TrapWebAssemblyOrContinue(EXCEPTION_POINTERS* exception) {
 }
 #else
 static std::atomic<sigaction_cb> previous_sigsegv_action;
+// TODO(align behavior between macos and other in next major version)
+#if defined(__APPLE__)
+static std::atomic<sigaction_cb> previous_sigbus_action;
+#endif  // __APPLE__
 
 void TrapWebAssemblyOrContinue(int signo, siginfo_t* info, void* ucontext) {
   if (!v8::TryHandleWebAssemblyTrapPosix(signo, info, ucontext)) {
+#if defined(__APPLE__)
+    sigaction_cb prev = signo == SIGBUS ? previous_sigbus_action.load()
+                                        : previous_sigsegv_action.load();
+#else
     sigaction_cb prev = previous_sigsegv_action.load();
+#endif  // __APPLE__
     if (prev != nullptr) {
       prev(signo, info, ucontext);
     } else {
@@ -390,12 +461,23 @@ void RegisterSignalHandler(int signal,
                            bool reset_handler) {
   CHECK_NOT_NULL(handler);
 #if NODE_USE_V8_WASM_TRAP_HANDLER
-  if (signal == SIGSEGV) {
+  // Stash the user-registered handlers for TrapWebAssemblyOrContinue
+  // to call out to when the signal is not coming from a WASM OOM.
+  if (signal == SIGSEGV && is_wasm_trap_handler_configured.load()) {
     CHECK(previous_sigsegv_action.is_lock_free());
     CHECK(!reset_handler);
     previous_sigsegv_action.store(handler);
     return;
   }
+  // TODO(align behavior between macos and other in next major version)
+#if defined(__APPLE__)
+  if (signal == SIGBUS && is_wasm_trap_handler_configured.load()) {
+    CHECK(previous_sigbus_action.is_lock_free());
+    CHECK(!reset_handler);
+    previous_sigbus_action.store(handler);
+    return;
+  }
+#endif  // __APPLE__
 #endif  // NODE_USE_V8_WASM_TRAP_HANDLER
   struct sigaction sa;
   memset(&sa, 0, sizeof(sa));
@@ -428,12 +510,29 @@ void ResetSignalHandlers() {
     if (nr == SIGKILL || nr == SIGSTOP)
       continue;
     act.sa_handler = (nr == SIGPIPE || nr == SIGXFSZ) ? SIG_IGN : SIG_DFL;
+    if (act.sa_handler == SIG_DFL) {
+      // The only bad handler value we can inherit from before exec is SIG_IGN
+      // (any actual function pointer is reset to SIG_DFL during exec).
+      // If that's the case, we want to reset it back to SIG_DFL.
+      // However, it's also possible that an embedder (or an LD_PRELOAD-ed
+      // library) has set up own signal handler for own purposes
+      // (e.g. profiling). If that's the case, we want to keep it intact.
+      struct sigaction old;
+      CHECK_EQ(0, sigaction(nr, nullptr, &old));
+      if ((old.sa_flags & SA_SIGINFO) || old.sa_handler != SIG_IGN) continue;
+    }
     CHECK_EQ(0, sigaction(nr, &act, nullptr));
   }
 #endif  // __POSIX__
 }
 
+// We use uint32_t since that can be accessed as a lock-free atomic
+// variable on all platforms that we support, which we require in
+// order for its value to be usable inside signal handlers.
 static std::atomic<uint32_t> init_process_flags = 0;
+static_assert(
+    std::is_same_v<std::underlying_type_t<ProcessInitializationFlags::Flags>,
+                   uint32_t>);
 
 static void PlatformInit(ProcessInitializationFlags::Flags flags) {
   // init_process_flags is accessed in ResetStdio(),
@@ -524,29 +623,6 @@ static void PlatformInit(ProcessInitializationFlags::Flags flags) {
   if (!(flags & ProcessInitializationFlags::kNoDefaultSignalHandling)) {
     RegisterSignalHandler(SIGINT, SignalExit, true);
     RegisterSignalHandler(SIGTERM, SignalExit, true);
-
-#if NODE_USE_V8_WASM_TRAP_HANDLER
-#if defined(_WIN32)
-    {
-      constexpr ULONG first = TRUE;
-      per_process::old_vectored_exception_handler =
-          AddVectoredExceptionHandler(first, TrapWebAssemblyOrContinue);
-    }
-#else
-    // Tell V8 to disable emitting WebAssembly
-    // memory bounds checks. This means that we have
-    // to catch the SIGSEGV in TrapWebAssemblyOrContinue
-    // and pass the signal context to V8.
-    {
-      struct sigaction sa;
-      memset(&sa, 0, sizeof(sa));
-      sa.sa_sigaction = TrapWebAssemblyOrContinue;
-      sa.sa_flags = SA_SIGINFO;
-      CHECK_EQ(sigaction(SIGSEGV, &sa, nullptr), 0);
-    }
-#endif  // defined(_WIN32)
-    V8::EnableWebAssemblyTrapHandler(false);
-#endif  // NODE_USE_V8_WASM_TRAP_HANDLER
   }
 
   if (!(flags & ProcessInitializationFlags::kNoAdjustResourceLimits)) {
@@ -643,12 +719,30 @@ void ResetStdio() {
       while (err == -1 && errno == EINTR);  // NOLINT
       CHECK_EQ(0, pthread_sigmask(SIG_UNBLOCK, &sa, nullptr));
 
-      // Normally we expect err == 0. But if macOS App Sandbox is enabled,
-      // tcsetattr will fail with err == -1 and errno == EPERM.
-      CHECK_IMPLIES(err != 0, err == -1 && errno == EPERM);
+      // We don't check the return value of tcsetattr() because it can fail
+      // for a number of reasons, none that we can do anything about. Examples:
+      // - if macOS App Sandbox is enabled, tcsetattr fails with EPERM
+      // - if the process group is orphaned, e.g. because the user logged out,
+      //   tcsetattr fails with EIO
     }
   }
 #endif  // __POSIX__
+}
+
+// Validates the benchmark runner options of the global (per-process) options
+// once every option source has been parsed. See
+// EnvironmentOptions::CheckBenchOptions().
+static void CheckGlobalBenchOptions(std::vector<std::string>* errors) {
+  Mutex::ScopedLock lock(per_process::cli_options_mutex);
+  per_process::cli_options->per_isolate->per_env->CheckBenchOptions(errors);
+}
+
+// Validates the options that conflict with --process-timeout once every option
+// source has been parsed. See PerProcessOptions::CheckProcessTimeoutOptions().
+static void CheckGlobalProcessTimeoutOptions(
+    const std::vector<std::string>& argv, std::vector<std::string>* errors) {
+  Mutex::ScopedLock lock(per_process::cli_options_mutex);
+  per_process::cli_options->CheckProcessTimeoutOptions(errors, argv);
 }
 
 static ExitCode ProcessGlobalArgsInternal(std::vector<std::string>* args,
@@ -687,26 +781,45 @@ static ExitCode ProcessGlobalArgsInternal(std::vector<std::string>* args,
     return ExitCode::kInvalidCommandLineArgument2;
   }
 
-  // TODO(aduh95): remove this when the harmony-import-assertions flag
-  // is removed in V8.
-  if (std::find(v8_args.begin(), v8_args.end(),
-                "--no-harmony-import-assertions") == v8_args.end()) {
-    v8_args.emplace_back("--harmony-import-assertions");
+  if (!per_process::cli_options->per_isolate->max_old_space_size_percentage
+           .empty()) {
+    v8_args.emplace_back(
+        "--max_old_space_size=" +
+        per_process::cli_options->per_isolate->max_old_space_size);
   }
 
   auto env_opts = per_process::cli_options->per_isolate->per_env;
-  if (std::find(v8_args.begin(), v8_args.end(),
-                "--abort-on-uncaught-exception") != v8_args.end() ||
-      std::find(v8_args.begin(), v8_args.end(),
-                "--abort_on_uncaught_exception") != v8_args.end()) {
+  if (std::ranges::find(v8_args, "--abort-on-uncaught-exception") !=
+          v8_args.end() ||
+      std::ranges::find(v8_args, "--abort_on_uncaught_exception") !=
+          v8_args.end()) {
     env_opts->abort_on_uncaught_exception = true;
+  }
+
+  if (std::ranges::find(v8_args, "--no-js-source-phase-imports") ==
+      v8_args.end()) {
+    v8_args.emplace_back("--js-source-phase-imports");
+  }
+
+  // V8 aborts the process when external memory grows by more than
+  // --external-memory-max-reasonable-size gigabytes in a single step. That
+  // limit is a Chromium-oriented sanity check; allocating a buffer larger
+  // than it is a legitimate thing to do in Node, and should raise a
+  // RangeError rather than crash. Disable the check unless the user asked
+  // for a specific limit.
+  // Refs: https://github.com/nodejs/node/issues/65534
+  if (std::ranges::none_of(v8_args, [](const std::string& arg) {
+        return arg.starts_with("--external-memory-max-reasonable-size") ||
+               arg.starts_with("--external_memory_max_reasonable_size");
+      })) {
+    v8_args.emplace_back("--external-memory-max-reasonable-size=0");
   }
 
 #ifdef __POSIX__
   // Block SIGPROF signals when sleeping in epoll_wait/kevent/etc.  Avoids the
   // performance penalty of frequent EINTR wakeups when the profiler is running.
   // Only do this for v8.log profiling, as it breaks v8::CpuProfiler users.
-  if (std::find(v8_args.begin(), v8_args.end(), "--prof") != v8_args.end()) {
+  if (std::ranges::find(v8_args, "--prof") != v8_args.end()) {
     uv_loop_configure(uv_default_loop(), UV_LOOP_BLOCK_SIGNAL, SIGPROF);
   }
 #endif
@@ -714,9 +827,9 @@ static ExitCode ProcessGlobalArgsInternal(std::vector<std::string>* args,
   std::vector<char*> v8_args_as_char_ptr(v8_args.size());
   if (v8_args.size() > 0) {
     for (size_t i = 0; i < v8_args.size(); ++i)
-      v8_args_as_char_ptr[i] = &v8_args[i][0];
+      v8_args_as_char_ptr[i] = v8_args[i].data();
     int argc = v8_args.size();
-    V8::SetFlagsFromCommandLine(&argc, &v8_args_as_char_ptr[0], true);
+    V8::SetFlagsFromCommandLine(&argc, v8_args_as_char_ptr.data(), true);
     v8_args_as_char_ptr.resize(argc);
   }
 
@@ -734,11 +847,75 @@ int ProcessGlobalArgs(std::vector<std::string>* args,
                       std::vector<std::string>* exec_args,
                       std::vector<std::string>* errors,
                       OptionEnvvarSettings settings) {
-  return static_cast<int>(
-      ProcessGlobalArgsInternal(args, exec_args, errors, settings));
+  const ExitCode exit_code =
+      ProcessGlobalArgsInternal(args, exec_args, errors, settings);
+  if (exit_code != ExitCode::kNoFailure) return static_cast<int>(exit_code);
+  // Embedders parse every option source in a single pass, so the benchmark
+  // options can be validated right away.
+  CheckGlobalBenchOptions(errors);
+  if (!errors->empty()) {
+    return static_cast<int>(ExitCode::kInvalidCommandLineArgument);
+  }
+  return static_cast<int>(ExitCode::kNoFailure);
 }
 
 static std::atomic_bool init_called{false};
+
+// Collects --allow-env per option source. Files (the configuration file, and
+// NODE_OPTIONS defined in env files) may be controlled by the project being
+// run rather than by whoever started Node.js, so when the command line or the
+// NODE_OPTIONS environment variable enable the permission model, --allow-env
+// values from files can only narrow the access those sources grant.
+class AllowEnvSources {
+ public:
+  explicit AllowEnvSources(EnvironmentOptions* options) : options_(options) {}
+
+  // Must be called before the options of a source are parsed.
+  void BeginSource() {
+    saved_permission_ = options_->permission;
+    saved_permission_audit_ = options_->permission_audit;
+    options_->permission = false;
+    options_->permission_audit = false;
+  }
+
+  // Must be called after the options of a source are parsed.
+  void EndSource(bool trusted) {
+    if (trusted && (options_->permission || options_->permission_audit)) {
+      trusted_enables_permission_ = true;
+    }
+    options_->permission = options_->permission || saved_permission_;
+    options_->permission_audit =
+        options_->permission_audit || saved_permission_audit_;
+
+    std::vector<std::string>& values = trusted ? trusted_ : from_files_;
+    values.insert(
+        values.end(), options_->allow_env.begin(), options_->allow_env.end());
+    options_->allow_env.clear();
+  }
+
+  // Must be called once every source has been parsed.
+  void Finish() {
+    std::vector<std::string> trusted = permission::ParseEnvAllowList(trusted_);
+    std::vector<std::string> from_files =
+        permission::ParseEnvAllowList(from_files_);
+    if (trusted_enables_permission_ && !from_files.empty()) {
+      options_->allow_env =
+          permission::IntersectEnvAllowLists(trusted, from_files);
+      return;
+    }
+    options_->allow_env = std::move(trusted);
+    options_->allow_env.insert(
+        options_->allow_env.end(), from_files.begin(), from_files.end());
+  }
+
+ private:
+  EnvironmentOptions* options_;
+  std::vector<std::string> trusted_;
+  std::vector<std::string> from_files_;
+  bool trusted_enables_permission_ = false;
+  bool saved_permission_ = false;
+  bool saved_permission_audit_ = false;
+};
 
 // TODO(addaleax): Turn this into a wrapper around InitializeOncePerProcess()
 // (with the corresponding additional flags set), then eventually remove this.
@@ -747,7 +924,7 @@ static ExitCode InitializeNodeWithArgsInternal(
     std::vector<std::string>* exec_argv,
     std::vector<std::string>* errors,
     ProcessInitializationFlags::Flags flags) {
-  // Make sure InitializeNodeWithArgs() is called only once.
+  // Make sure InitializeNodeWithArgsInternal() is called only once.
   CHECK(!init_called.exchange(true));
 
   // Initialize node_start_time to get relative uptime.
@@ -778,13 +955,106 @@ static ExitCode InitializeNodeWithArgsInternal(
   V8::SetFlagsFromString(NODE_V8_OPTIONS, sizeof(NODE_V8_OPTIONS) - 1);
 #endif
 
+  if (!!(flags & ProcessInitializationFlags::kGeneratePredictableSnapshot) ||
+      per_process::cli_options->per_isolate->build_snapshot) {
+    v8::V8::SetFlagsFromString("--predictable");
+    v8::V8::SetFlagsFromString("--random_seed=42");
+  }
+
+  // Specify this explicitly to avoid being affected by V8 changes to the
+  // default value.
+  V8::SetFlagsFromString("--rehash-snapshot");
+
   HandleEnvOptions(per_process::cli_options->per_isolate->per_env);
 
-#if !defined(NODE_WITHOUT_NODE_OPTIONS)
-  if (!(flags & ProcessInitializationFlags::kDisableNodeOptionsEnv)) {
-    std::string node_options;
+  std::string node_options;
+  std::string node_options_from_dotenv;
+  auto env_files = node::Dotenv::GetDataFromArgs(*argv);
 
-    if (credentials::SafeGetenv("NODE_OPTIONS", &node_options)) {
+  if (!env_files.empty()) {
+    CHECK(!per_process::v8_initialized);
+
+    for (const auto& file_data : env_files) {
+      switch (per_process::dotenv_file.ParsePath(file_data.path)) {
+        case Dotenv::ParseResult::Valid:
+          break;
+        case Dotenv::ParseResult::InvalidContent:
+          errors->push_back(file_data.path + ": invalid format");
+          break;
+        case Dotenv::ParseResult::FileError:
+          if (file_data.is_optional) {
+            fprintf(stderr,
+                    "%s not found. Continuing without it.\n",
+                    file_data.path.c_str());
+            continue;
+          }
+          errors->push_back(file_data.path + ": not found");
+          break;
+        default:
+          UNREACHABLE();
+      }
+    }
+
+    per_process::dotenv_file.AssignNodeOptionsIfAvailable(
+        &node_options_from_dotenv);
+  }
+
+  std::string node_options_from_config;
+  auto config_path = per_process::config_reader.GetDataFromArgs(argv);
+  if (per_process::config_reader.HasInvalidDefaultConfigFileArgument()) {
+    errors->push_back("--experimental-default-config-file does not take an "
+                      "argument");
+    return ExitCode::kInvalidCommandLineArgument;
+  }
+  if (config_path) {
+    switch (per_process::config_reader.ParseConfig(*config_path)) {
+      case ParseResult::Valid:
+        break;
+      case ParseResult::InvalidContent:
+        errors->push_back(std::string(*config_path) + ": invalid content");
+        break;
+      case ParseResult::FileError:
+        errors->push_back(std::string(*config_path) + ": not found");
+        break;
+      default:
+        UNREACHABLE();
+    }
+    node_options_from_config = per_process::config_reader.GetNodeOptions();
+    // (@marco-ippolito) Avoid reparsing the env options again
+    std::vector<std::string> env_argv_from_config =
+        ParseNodeOptionsEnvVar(node_options_from_config, errors);
+
+    // Check the number of flags in NODE_OPTIONS from the config file
+    // matches the parsed ones. This avoid users from sneaking in
+    // additional flags.
+    if (env_argv_from_config.size() !=
+        per_process::config_reader.GetFlagsSize()) {
+      errors->emplace_back("The number of NODE_OPTIONS doesn't match "
+                           "the number of flags in the config file");
+    }
+  }
+
+  node_options = node_options_from_config + node_options_from_dotenv;
+
+  AllowEnvSources allow_env_sources(
+      per_process::cli_options->per_isolate->per_env.get());
+
+#if !defined(NODE_WITHOUT_NODE_OPTIONS)
+  bool should_parse_node_options =
+      !(flags & ProcessInitializationFlags::kDisableNodeOptionsEnv);
+#ifndef DISABLE_SINGLE_EXECUTABLE_APPLICATION
+  if (sea::IsSingleExecutable()) {
+    const sea::SeaResource& sea_resource = sea::FindSingleExecutableResource();
+    if (sea_resource.exec_argv_extension != sea::SeaExecArgvExtension::kEnv) {
+      should_parse_node_options = false;
+    }
+  }
+#endif
+  if (should_parse_node_options) {
+    // NODE_OPTIONS environment variable is preferred over the file one.
+    const bool node_options_from_env =
+        credentials::SafeGetenv("NODE_OPTIONS", &node_options);
+    if (node_options_from_env || !node_options.empty()) {
       std::vector<std::string> env_argv =
           ParseNodeOptionsEnvVar(node_options, errors);
 
@@ -793,17 +1063,74 @@ static ExitCode InitializeNodeWithArgsInternal(
       // [0] is expected to be the program name, fill it in from the real argv.
       env_argv.insert(env_argv.begin(), argv->at(0));
 
+      allow_env_sources.BeginSource();
       const ExitCode exit_code = ProcessGlobalArgsInternal(
           &env_argv, nullptr, errors, kAllowedInEnvvar);
       if (exit_code != ExitCode::kNoFailure) return exit_code;
+      allow_env_sources.EndSource(/* trusted */ node_options_from_env);
+    }
+  } else {
+    std::string node_repl_external_env = {};
+    if (credentials::SafeGetenv("NODE_REPL_EXTERNAL_MODULE",
+                                &node_repl_external_env) ||
+        !node_repl_external_env.empty()) {
+      errors->emplace_back("NODE_REPL_EXTERNAL_MODULE can't be used with "
+                           "kDisableNodeOptionsEnv");
+      return ExitCode::kInvalidCommandLineArgument;
     }
   }
 #endif
 
   if (!(flags & ProcessInitializationFlags::kDisableCLIOptions)) {
-    const ExitCode exit_code =
+    // Parse the options coming from the config file.
+    // This is done before parsing the command line options
+    // as the cli flags are expected to override the config file ones.
+    std::vector<std::string> extra_argv =
+        per_process::config_reader.GetNamespaceFlags();
+    // [0] is expected to be the program name, fill it in from the real argv.
+    extra_argv.insert(extra_argv.begin(), argv->at(0));
+    // Parse the extra argv coming from the config file
+    allow_env_sources.BeginSource();
+    ExitCode exit_code = ProcessGlobalArgsInternal(
+        &extra_argv, nullptr, errors, kDisallowedInEnvvar);
+    if (exit_code != ExitCode::kNoFailure) return exit_code;
+    allow_env_sources.EndSource(/* trusted */ false);
+    // Parse options coming from the command line.
+    allow_env_sources.BeginSource();
+    exit_code =
         ProcessGlobalArgsInternal(argv, exec_argv, errors, kDisallowedInEnvvar);
     if (exit_code != ExitCode::kNoFailure) return exit_code;
+    allow_env_sources.EndSource(/* trusted */ true);
+  }
+
+  allow_env_sources.Finish();
+
+  // Every option source has now been parsed, so cross-source option
+  // constraints can finally be validated.
+  CheckGlobalBenchOptions(errors);
+  CheckGlobalProcessTimeoutOptions(*argv, errors);
+  if (!errors->empty()) return ExitCode::kInvalidCommandLineArgument;
+
+  // Checked here, once every source of options has been parsed, because the
+  // count below needs the arguments the command line itself gave.
+  {
+    auto* env_options = per_process::cli_options->per_isolate->per_env.get();
+    if (!env_options->experimental_vfs && env_options->vfs_load) {
+      errors->push_back("--vfs-load requires node:vfs to be enabled");
+    }
+    // A second --vfs-load would silently replace the first, and the option
+    // itself cannot say how often it was given; count it in the node options
+    // the command line yielded.
+    if (env_options->vfs_load && exec_argv != nullptr) {
+      size_t seen = 0;
+      for (const std::string& arg : *exec_argv) {
+        if (arg == "--vfs-load" || arg.starts_with("--vfs-load=")) seen++;
+      }
+      if (seen > 1) {
+        errors->push_back("--vfs-load may only be given once");
+      }
+    }
+    if (!errors->empty()) return ExitCode::kInvalidCommandLineArgument;
   }
 
   // Set the process.title immediately after processing argv if --title is set.
@@ -837,9 +1164,14 @@ static ExitCode InitializeNodeWithArgsInternal(
 
     // Initialize ICU.
     // If icu_data_dir is empty here, it will load the 'minimal' data.
-    if (!i18n::InitializeICUDirectory(per_process::cli_options->icu_data_dir)) {
-      errors->push_back("could not initialize ICU "
-                        "(check NODE_ICU_DATA or --icu-data-dir parameters)\n");
+    std::string icu_error;
+    if (!i18n::InitializeICUDirectory(per_process::cli_options->icu_data_dir,
+                                      &icu_error)) {
+      errors->push_back(icu_error +
+                        ": Could not initialize ICU. "
+                        "Check the directory specified by NODE_ICU_DATA or "
+                        "--icu-data-dir contains " U_ICUDATA_NAME ".dat and "
+                        "it's readable\n");
       return ExitCode::kInvalidCommandLineArgument;
     }
     per_process::metadata.versions.InitializeIntlVersions();
@@ -861,25 +1193,63 @@ static ExitCode InitializeNodeWithArgsInternal(
   return ExitCode::kNoFailure;
 }
 
-int InitializeNodeWithArgs(std::vector<std::string>* argv,
-                           std::vector<std::string>* exec_argv,
-                           std::vector<std::string>* errors,
-                           ProcessInitializationFlags::Flags flags) {
-  return static_cast<int>(
-      InitializeNodeWithArgsInternal(argv, exec_argv, errors, flags));
-}
+#if NODE_USE_V8_WASM_TRAP_HANDLER
+bool CanEnableWebAssemblyTrapHandler() {
+// On POSIX, the machine may have a limit on the amount of virtual memory
+// available, if it's not enough to allocate at least one cage for WASM,
+// then the trap-handler-based bound checks cannot be used.
+#ifdef __POSIX__
+  struct rlimit lim;
+  if (getrlimit(RLIMIT_AS, &lim) != 0 || lim.rlim_cur == RLIM_INFINITY) {
+    // Can't get the limit or there's no limit, assume trap handler can be
+    // enabled.
+    return true;
+  }
+  uint64_t virtual_memory_available = static_cast<uint64_t>(lim.rlim_cur);
 
-static std::unique_ptr<InitializationResultImpl>
-InitializeOncePerProcessInternal(const std::vector<std::string>& args,
-                                 ProcessInitializationFlags::Flags flags =
-                                     ProcessInitializationFlags::kNoFlags) {
-  auto result = std::make_unique<InitializationResultImpl>();
+  size_t byte_capacity = 64 * 1024;  // 64KB, the minimum size of a WASM memory.
+  uint64_t cage_size_needed_32 = V8::GetWasmMemoryReservationSizeInBytes(
+      V8::WasmMemoryType::kMemory32, byte_capacity);
+  uint64_t cage_size_needed_64 = V8::GetWasmMemoryReservationSizeInBytes(
+      V8::WasmMemoryType::kMemory64, byte_capacity);
+  uint64_t cage_size_needed =
+      std::max(cage_size_needed_32, cage_size_needed_64);
+  bool can_enable = virtual_memory_available >= cage_size_needed;
+  per_process::Debug(DebugCategory::BOOTSTRAP,
+                     "Virtual memory available: %" PRIu64 " bytes,\n"
+                     "cage size needed for 32-bit: %" PRIu64 " bytes,\n"
+                     "cage size needed for 64-bit: %" PRIu64 " bytes,\n"
+                     "Can%senable WASM trap handler\n",
+                     virtual_memory_available,
+                     cage_size_needed_32,
+                     cage_size_needed_64,
+                     can_enable ? " " : " not ");
+
+  return can_enable;
+#else
+  return true;
+#endif  // __POSIX__
+}
+#endif  // NODE_USE_V8_WASM_TRAP_HANDLER
+
+// Whether InitializeOncePerProcessInternal() scrubs the process environment
+// when the permission model restricts access to it. Only node::Start() does
+// this. Embedders own their process environment, and scrub it themselves.
+enum class EnvironmentScrubMode { kNever, kIfRestricted };
+
+static std::shared_ptr<InitializationResultImpl>
+InitializeOncePerProcessInternal(
+    const std::vector<std::string>& args,
+    ProcessInitializationFlags::Flags flags =
+        ProcessInitializationFlags::kNoFlags,
+    EnvironmentScrubMode scrub_mode = EnvironmentScrubMode::kNever) {
+  auto result = std::make_shared<InitializationResultImpl>();
   result->args_ = args;
 
   if (!(flags & ProcessInitializationFlags::kNoParseGlobalDebugVariables)) {
     // Initialized the enabled list for Debug() calls with system
     // environment variables.
-    per_process::enabled_debug_list.Parse();
+    per_process::enabled_debug_list.Parse(nullptr);
   }
 
   PlatformInit(flags);
@@ -895,12 +1265,17 @@ InitializeOncePerProcessInternal(const std::vector<std::string>& args,
   }
 
   if (!(flags & ProcessInitializationFlags::kNoUseLargePages) &&
-      (per_process::cli_options->use_largepages == "on" ||
-       per_process::cli_options->use_largepages == "silent")) {
-    int lp_result = node::MapStaticCodeToLargePages();
-    if (per_process::cli_options->use_largepages == "on" && lp_result != 0) {
-      result->errors_.emplace_back(node::LargePagesError(lp_result));
-    }
+      (per_process::cli_options->use_largepages == "on")) {
+    result->errors_.emplace_back("--use-largepages is no longer supported.");
+  }
+
+  // A bare `--run` (empty value) lists the available scripts; a value runs it.
+  if (per_process::cli_options->has_run) {
+    auto positional_args = task_runner::GetPositionalArgs(args);
+    result->early_return_ = true;
+    task_runner::RunTask(
+        result, per_process::cli_options->run, positional_args);
+    return result;
   }
 
   if (!(flags & ProcessInitializationFlags::kNoPrintHelpOrVersionOutput)) {
@@ -928,7 +1303,8 @@ InitializeOncePerProcessInternal(const std::vector<std::string>& args,
   }
 
   if (!(flags & ProcessInitializationFlags::kNoInitOpenSSL)) {
-#if HAVE_OPENSSL && !defined(OPENSSL_IS_BORINGSSL)
+#if HAVE_OPENSSL
+#ifndef OPENSSL_IS_BORINGSSL
     auto GetOpenSSLErrorString = []() -> std::string {
       std::string ret;
       ERR_print_errors_cb(
@@ -942,14 +1318,9 @@ InitializeOncePerProcessInternal(const std::vector<std::string>& args,
       return ret;
     };
 
-    {
-      std::string extra_ca_certs;
-      if (credentials::SafeGetenv("NODE_EXTRA_CA_CERTS", &extra_ca_certs))
-        crypto::UseExtraCaCerts(extra_ca_certs);
-    }
     // In the case of FIPS builds we should make sure
     // the random source is properly initialized first.
-#if OPENSSL_VERSION_MAJOR >= 3
+    //
     // Call OPENSSL_init_crypto to initialize OPENSSL_INIT_LOAD_CONFIG to
     // avoid the default behavior where errors raised during the parsing of the
     // OpenSSL configuration file are not propagated and cannot be detected.
@@ -987,6 +1358,7 @@ InitializeOncePerProcessInternal(const std::vector<std::string>& args,
     }
 
     OPENSSL_INIT_SETTINGS* settings = OPENSSL_INIT_new();
+    CHECK_NOT_NULL(settings);
     OPENSSL_INIT_set_config_filename(settings, conf_file);
     OPENSSL_INIT_set_config_appname(settings, conf_section_name);
     OPENSSL_INIT_set_config_file_flags(settings,
@@ -1005,46 +1377,143 @@ InitializeOncePerProcessInternal(const std::vector<std::string>& args,
                                    GetOpenSSLErrorString());
       return result;
     }
-#else  // OPENSSL_VERSION_MAJOR < 3
-    if (FIPS_mode()) {
-      OPENSSL_init();
-    }
-#endif
-    if (!crypto::ProcessFipsOptions()) {
-      // XXX: ERR_GET_REASON does not return something that is
-      // useful as an exit code at all.
-      result->exit_code_ =
-          static_cast<ExitCode>(ERR_GET_REASON(ERR_peek_error()));
+
+    if (auto fips_error = crypto::ProcessFipsOptions()) {
+      result->exit_code_ = ExitCode::kGenericUserError;
       result->early_return_ = true;
-      result->errors_.emplace_back(
-          "OpenSSL error when trying to enable FIPS:\n" +
-          GetOpenSSLErrorString());
+      result->errors_.emplace_back(std::move(*fips_error));
       return result;
     }
+    crypto::InstallFipsIndicatorCallback();
 
     // Ensure CSPRNG is properly seeded.
-    CHECK(crypto::CSPRNG(nullptr, 0).is_ok());
+    CHECK(ncrypto::CSPRNG(nullptr, 0));
 
     V8::SetEntropySource([](unsigned char* buffer, size_t length) {
       // V8 falls back to very weak entropy when this function fails
       // and /dev/urandom isn't available. That wouldn't be so bad if
       // the entropy was only used for Math.random() but it's also used for
       // hash table and address space layout randomization. Better to abort.
-      CHECK(crypto::CSPRNG(buffer, length).is_ok());
+      CHECK(ncrypto::CSPRNG(buffer, length));
       return true;
     });
-#endif  // HAVE_OPENSSL && !defined(OPENSSL_IS_BORINGSSL)
+#endif  // !defined(OPENSSL_IS_BORINGSSL)
+    {
+      std::string extra_ca_certs;
+      if (credentials::SafeGetenv("NODE_EXTRA_CA_CERTS", &extra_ca_certs))
+        crypto::UseExtraCaCerts(extra_ca_certs);
+    }
+#endif  // HAVE_OPENSSL
+  }
+
+  {
+    const auto& env_options = per_process::cli_options->per_isolate->per_env;
+    const std::vector<std::string> allow =
+        permission::ParseEnvAllowList(env_options->allow_env);
+    const bool allow_all =
+        std::find(allow.begin(), allow.end(), "*") != allow.end();
+    if (env_options->permission_audit && !allow_all) {
+      // In audit mode nothing is removed, but accesses to the variables that
+      // enforcing the permission model would remove are published.
+      permission::RecordAuditedEnvironmentVariables(allow);
+    } else if (env_options->permission && !allow_all) {
+      if (scrub_mode == EnvironmentScrubMode::kIfRestricted) {
+        // When the permission model is enforced, remove every environment
+        // variable that --allow-env does not grant access to. Every
+        // per-process consumer of the environment has read it by now, and the
+        // process is still single-threaded: the platform worker threads start
+        // below.
+        permission::ScrubProcessEnvironment({.allow = allow});
+      } else {
+        // Embedders own the process environment, and must remove these
+        // variables themselves, with ScrubProcessEnvironment().
+        const std::vector<std::string> denied =
+            permission::FindDeniedEnvironmentVariables(allow);
+        if (!denied.empty()) {
+          constexpr size_t kMaxListedNames = 5;
+          std::string names;
+          for (size_t i = 0; i < denied.size() && i < kMaxListedNames; i++) {
+            if (i > 0) names += ", ";
+            names += denied[i];
+          }
+          if (denied.size() > kMaxListedNames) {
+            names += ", and " +
+                     std::to_string(denied.size() - kMaxListedNames) + " more";
+          }
+          result->errors_.push_back(
+              "The process environment contains variables that --allow-env "
+              "does not grant access to (" +
+              names +
+              "). Remove them with node::ScrubProcessEnvironment() before "
+              "calling node::InitializeOncePerProcess().");
+          result->exit_code_ = ExitCode::kInvalidCommandLineArgument;
+          result->early_return_ = true;
+          return result;
+        }
+      }
+    }
   }
 
   if (!(flags & ProcessInitializationFlags::kNoInitializeNodeV8Platform)) {
+    uv_thread_setname("node-MainThread");
     per_process::v8_platform.Initialize(
         static_cast<int>(per_process::cli_options->v8_thread_pool_size));
     result->platform_ = per_process::v8_platform.Platform();
   }
 
+  if (!(flags & ProcessInitializationFlags::kNoInitializeCppgc)) {
+    v8::PageAllocator* allocator = nullptr;
+    if (result->platform_ != nullptr) {
+      allocator = result->platform_->GetPageAllocator();
+    }
+    cppgc::InitializeProcess(allocator);
+  }
+
+  if (flags & ProcessInitializationFlags::kNoHarvestBuiltinCodeCache) {
+    builtins::BuiltinLoader::SetHarvestCodeCache(false);
+  }
+
   if (!(flags & ProcessInitializationFlags::kNoInitializeV8)) {
     V8::Initialize();
+
+    // Disable absl deadlock detection in V8 as it reports false-positive cases.
+    // TODO(legendecas): Replace this global disablement with case suppressions.
+    // https://github.com/nodejs/node-v8/issues/301
+    absl::SetMutexDeadlockDetectionMode(absl::OnDeadlockCycle::kIgnore);
   }
+
+#if NODE_USE_V8_WASM_TRAP_HANDLER
+  bool use_wasm_trap_handler =
+      !per_process::cli_options->disable_wasm_trap_handler;
+  if (!(flags & ProcessInitializationFlags::kNoDefaultSignalHandling) &&
+      use_wasm_trap_handler && CanEnableWebAssemblyTrapHandler()) {
+    per_process::Debug(DebugCategory::BOOTSTRAP,
+                       "Enabling WebAssembly trap handler for bounds checks\n");
+#if defined(_WIN32)
+    constexpr ULONG first = TRUE;
+    per_process::old_vectored_exception_handler =
+        AddVectoredExceptionHandler(first, TrapWebAssemblyOrContinue);
+#else
+    // Tell V8 to disable emitting WebAssembly
+    // memory bounds checks. This means that we have
+    // to catch the SIGSEGV/SIGBUS in TrapWebAssemblyOrContinue
+    // and pass the signal context to V8.
+    {
+      struct sigaction sa;
+      memset(&sa, 0, sizeof(sa));
+      sa.sa_sigaction = TrapWebAssemblyOrContinue;
+      sa.sa_flags = SA_SIGINFO;
+      CHECK_EQ(sigaction(SIGSEGV, &sa, nullptr), 0);
+// TODO(align behavior between macos and other in next major version)
+#if defined(__APPLE__)
+      CHECK_EQ(sigaction(SIGBUS, &sa, nullptr), 0);
+#endif
+    }
+#endif  // defined(_WIN32)
+    is_wasm_trap_handler_configured.store(true);
+    V8::EnableWebAssemblyTrapHandler(false);
+  }
+#endif  // NODE_USE_V8_WASM_TRAP_HANDLER
 
   performance::performance_v8_start = PERFORMANCE_NOW();
   per_process::v8_initialized = true;
@@ -1052,17 +1521,44 @@ InitializeOncePerProcessInternal(const std::vector<std::string>& args,
   return result;
 }
 
-std::unique_ptr<InitializationResult> InitializeOncePerProcess(
+std::shared_ptr<InitializationResult> InitializeOncePerProcess(
     const std::vector<std::string>& args,
     ProcessInitializationFlags::Flags flags) {
   return InitializeOncePerProcessInternal(args, flags);
 }
 
+v8::Maybe<std::vector<std::string>> ScrubProcessEnvironment(
+    const ProcessEnvironmentScrubOptions& options) {
+  if (per_process::v8_initialized) {
+    return v8::Nothing<std::vector<std::string>>();
+  }
+  for (const std::string& pattern : options.allow) {
+    if (!permission::IsValidEnvAllowPattern(pattern)) {
+      return v8::Nothing<std::vector<std::string>>();
+    }
+  }
+  return v8::Just(permission::ScrubProcessEnvironment({
+      .allow = options.allow,
+      .keep_runtime_defaults = options.keep_runtime_defaults,
+      .wipe_initial_block = options.wipe_initial_block,
+  }));
+}
+
+std::vector<std::string> GetRuntimeEnvironmentDefaults() {
+  const std::span<const std::string_view> defaults =
+      permission::GetRuntimeEnvironmentDefaults();
+  return std::vector<std::string>(defaults.begin(), defaults.end());
+}
+
 void TearDownOncePerProcess() {
-  const uint64_t flags = init_process_flags.load();
+  const uint32_t flags = init_process_flags.load();
   ResetStdio();
   if (!(flags & ProcessInitializationFlags::kNoDefaultSignalHandling)) {
     ResetSignalHandlers();
+  }
+
+  if (!(flags & ProcessInitializationFlags::kNoInitializeCppgc)) {
+    cppgc::ShutdownProcess();
   }
 
   per_process::v8_initialized = false;
@@ -1071,7 +1567,7 @@ void TearDownOncePerProcess() {
   }
 
 #if NODE_USE_V8_WASM_TRAP_HANDLER && defined(_WIN32)
-  if (!(flags & ProcessInitializationFlags::kNoDefaultSignalHandling)) {
+  if (is_wasm_trap_handler_configured.load()) {
     RemoveVectoredExceptionHandler(per_process::old_vectored_exception_handler);
   }
 #endif
@@ -1086,10 +1582,11 @@ void TearDownOncePerProcess() {
     // will never be fully cleaned up.
     per_process::v8_platform.Dispose();
   }
-}
 
-InitializationResult::~InitializationResult() {}
-InitializationResultImpl::~InitializationResultImpl() {}
+#if HAVE_OPENSSL
+  crypto::CleanupCachedRootCertificates();
+#endif  // HAVE_OPENSSL
+}
 
 ExitCode GenerateAndWriteSnapshotData(const SnapshotData** snapshot_data_ptr,
                                       const InitializationResultImpl* result) {
@@ -1097,9 +1594,54 @@ ExitCode GenerateAndWriteSnapshotData(const SnapshotData** snapshot_data_ptr,
   // nullptr indicates there's no snapshot data.
   DCHECK_NULL(*snapshot_data_ptr);
 
+  SnapshotConfig snapshot_config;
+  const std::string& config_path =
+      per_process::cli_options->per_isolate->build_snapshot_config;
+  // For snapshot config read from JSON, we fix up process.argv[1] using the
+  // "builder" field.
+  std::vector<std::string> args_maybe_patched;
+  args_maybe_patched.reserve(result->args().size() + 1);
+  if (!config_path.empty()) {
+    std::optional<SnapshotConfig> optional_config =
+        ReadSnapshotConfig(config_path.c_str());
+    if (!optional_config.has_value()) {
+      return ExitCode::kGenericUserError;
+    }
+    snapshot_config = std::move(optional_config.value());
+    DCHECK(snapshot_config.builder_script_path.has_value());
+    args_maybe_patched.emplace_back(result->args()[0]);
+    args_maybe_patched.emplace_back(
+        snapshot_config.builder_script_path.value());
+    if (result->args().size() > 1) {
+      args_maybe_patched.insert(args_maybe_patched.end(),
+                                result->args().begin() + 1,
+                                result->args().end());
+    }
+  } else {
+    snapshot_config.builder_script_path = result->args()[1];
+    args_maybe_patched = result->args();
+  }
+  DCHECK(snapshot_config.builder_script_path.has_value());
+  const std::string& builder_script =
+      snapshot_config.builder_script_path.value();
+
+  // For the special builder node:generate_default_snapshot_source, generate
+  // the snapshot as C++ source and write it to snapshot.cc (for testing).
+  if (builder_script == "node:generate_default_snapshot_source") {
+    // Reset to empty to generate from scratch.
+    snapshot_config.builder_script_path = {};
+    exit_code =
+        node::SnapshotBuilder::GenerateAsSource("snapshot.cc",
+                                                args_maybe_patched,
+                                                result->exec_args(),
+                                                snapshot_config,
+                                                true /* use_array_literals */);
+    return exit_code;
+  }
+
   // node:embedded_snapshot_main indicates that we are using the
   // embedded snapshot and we are not supposed to clean it up.
-  if (result->args()[1] == "node:embedded_snapshot_main") {
+  if (builder_script == "node:embedded_snapshot_main") {
     *snapshot_data_ptr = SnapshotBuilder::GetEmbeddedSnapshotData();
     if (*snapshot_data_ptr == nullptr) {
       // The Node.js binary is built without embedded snapshot
@@ -1107,16 +1649,35 @@ ExitCode GenerateAndWriteSnapshotData(const SnapshotData** snapshot_data_ptr,
               "node:embedded_snapshot_main was specified as snapshot "
               "entry point but Node.js was built without embedded "
               "snapshot.\n");
-      // TODO(joyeecheung): should be kInvalidCommandLineArgument instead.
-      exit_code = ExitCode::kGenericUserError;
+      exit_code = ExitCode::kInvalidCommandLineArgument;
       return exit_code;
     }
   } else {
-    // Otherwise, load and run the specified main script.
+    std::optional<std::string> builder_script_content;
+    // Otherwise, load and run the specified builder script.
     std::unique_ptr<SnapshotData> generated_data =
         std::make_unique<SnapshotData>();
-    exit_code = node::SnapshotBuilder::Generate(
-        generated_data.get(), result->args(), result->exec_args());
+    if (builder_script != "node:generate_default_snapshot") {
+      builder_script_content = std::string();
+      int r = ReadFileSync(&(builder_script_content.value()),
+                           builder_script.c_str());
+      if (r != 0) {
+        FPrintF(stderr,
+                "Cannot read builder script %s for building snapshot. %s: %s\n",
+                builder_script,
+                uv_err_name(r),
+                uv_strerror(r));
+        return ExitCode::kGenericUserError;
+      }
+    } else {
+      snapshot_config.builder_script_path = std::nullopt;
+    }
+
+    exit_code = node::SnapshotBuilder::Generate(generated_data.get(),
+                                                args_maybe_patched,
+                                                result->exec_args(),
+                                                builder_script_content,
+                                                snapshot_config);
     if (exit_code == ExitCode::kNoFailure) {
       *snapshot_data_ptr = generated_data.release();
     } else {
@@ -1135,64 +1696,81 @@ ExitCode GenerateAndWriteSnapshotData(const SnapshotData** snapshot_data_ptr,
 
   FILE* fp = fopen(snapshot_blob_path.c_str(), "wb");
   if (fp != nullptr) {
-    (*snapshot_data_ptr)->ToBlob(fp);
+    (*snapshot_data_ptr)->ToFile(fp);
     fclose(fp);
   } else {
     fprintf(stderr,
             "Cannot open %s for writing a snapshot.\n",
             snapshot_blob_path.c_str());
-    // TODO(joyeecheung): should be kStartupSnapshotFailure.
-    exit_code = ExitCode::kGenericUserError;
+    exit_code = ExitCode::kStartupSnapshotFailure;
   }
   return exit_code;
 }
 
-ExitCode LoadSnapshotDataAndRun(const SnapshotData** snapshot_data_ptr,
-                                const InitializationResultImpl* result) {
-  ExitCode exit_code = result->exit_code_enum();
+bool LoadSnapshotData(const SnapshotData** snapshot_data_ptr) {
   // nullptr indicates there's no snapshot data.
   DCHECK_NULL(*snapshot_data_ptr);
+
+  bool is_sea = false;
+#ifndef DISABLE_SINGLE_EXECUTABLE_APPLICATION
+  if (sea::IsSingleExecutable()) {
+    is_sea = true;
+    const sea::SeaResource& sea = sea::FindSingleExecutableResource();
+    if (sea.use_snapshot()) {
+      std::unique_ptr<SnapshotData> read_data =
+          std::make_unique<SnapshotData>();
+      std::string_view snapshot = sea.main_code_or_snapshot;
+      // The SEA resource remains mapped for the process lifetime, so V8 can
+      // consume the startup data directly from the executable image.
+      if (SnapshotData::FromBlob(read_data.get(),
+                                 snapshot,
+                                 SnapshotData::DataOwnership::kNotOwned)) {
+        *snapshot_data_ptr = read_data.release();
+        return true;
+      } else {
+        fprintf(stderr, "Invalid snapshot data in single executable binary\n");
+        return false;
+      }
+    }
+  }
+#endif
+
   // --snapshot-blob indicates that we are reading a customized snapshot.
-  if (!per_process::cli_options->snapshot_blob.empty()) {
+  // Ignore it when we are loading from SEA.
+  if (!is_sea && !per_process::cli_options->snapshot_blob.empty()) {
     std::string filename = per_process::cli_options->snapshot_blob;
     FILE* fp = fopen(filename.c_str(), "rb");
     if (fp == nullptr) {
       fprintf(stderr, "Cannot open %s", filename.c_str());
-      // TODO(joyeecheung): should be kStartupSnapshotFailure.
-      exit_code = ExitCode::kGenericUserError;
-      return exit_code;
+      return false;
     }
     std::unique_ptr<SnapshotData> read_data = std::make_unique<SnapshotData>();
-    if (!SnapshotData::FromBlob(read_data.get(), fp)) {
-      // If we fail to read the customized snapshot, simply exit with 1.
-      // TODO(joyeecheung): should be kStartupSnapshotFailure.
-      exit_code = ExitCode::kGenericUserError;
-      return exit_code;
+    bool ok = SnapshotData::FromFile(read_data.get(), fp);
+    fclose(fp);
+    if (!ok) {
+      return false;
     }
     *snapshot_data_ptr = read_data.release();
-    fclose(fp);
-  } else if (per_process::cli_options->node_snapshot) {
-    // If --snapshot-blob is not specified, we are reading the embedded
-    // snapshot, but we will skip it if --no-node-snapshot is specified.
+    return true;
+  }
+
+  if (per_process::cli_options->node_snapshot) {
+    // If --snapshot-blob is not specified or if the SEA contains no snapshot,
+    // we are reading the embedded snapshot, but we will skip it if
+    // --no-node-snapshot is specified.
     const node::SnapshotData* read_data =
         SnapshotBuilder::GetEmbeddedSnapshotData();
-    if (read_data != nullptr && read_data->Check()) {
+    if (read_data != nullptr) {
+      if (!read_data->Check()) {
+        return false;
+      }
       // If we fail to read the embedded snapshot, treat it as if Node.js
       // was built without one.
       *snapshot_data_ptr = read_data;
     }
   }
 
-  if ((*snapshot_data_ptr) != nullptr) {
-    BuiltinLoader::RefreshCodeCache((*snapshot_data_ptr)->code_cache);
-  }
-  NodeMainInstance main_instance(*snapshot_data_ptr,
-                                 uv_default_loop(),
-                                 per_process::v8_platform.Platform(),
-                                 result->args(),
-                                 result->exec_args());
-  exit_code = main_instance.Run();
-  return exit_code;
+  return true;
 }
 
 static ExitCode StartInternal(int argc, char** argv) {
@@ -1201,9 +1779,11 @@ static ExitCode StartInternal(int argc, char** argv) {
   // Hack around with the argv pointer. Used for process.title = "blah".
   argv = uv_setup_args(argc, argv);
 
-  std::unique_ptr<InitializationResultImpl> result =
+  std::shared_ptr<InitializationResultImpl> result =
       InitializeOncePerProcessInternal(
-          std::vector<std::string>(argv, argv + argc));
+          std::vector<std::string>(argv, argv + argc),
+          ProcessInitializationFlags::kNoFlags,
+          EnvironmentScrubMode::kIfRestricted);
   for (const std::string& error : result->errors()) {
     FPrintF(stderr, "%s: %s\n", result->args().at(0), error);
   }
@@ -1224,10 +1804,27 @@ static ExitCode StartInternal(int argc, char** argv) {
   });
 
   uv_loop_configure(uv_default_loop(), UV_METRICS_IDLE_TIME);
+  std::string sea_config = per_process::cli_options->experimental_sea_config;
+  if (!sea_config.empty()) {
+#if defined(DISABLE_SINGLE_EXECUTABLE_APPLICATION)
+    fprintf(stderr, "Single executable application is disabled.\n");
+    return ExitCode::kGenericUserError;
+#else
+    return sea::WriteSingleExecutableBlob(
+        sea_config, result->args(), result->exec_args());
+#endif
+  }
+
+  sea_config = per_process::cli_options->build_sea;
+  if (!sea_config.empty()) {
+    return sea::BuildSingleExecutable(
+        sea_config, result->args(), result->exec_args());
+  }
 
   // --build-snapshot indicates that we are in snapshot building mode.
-  if (per_process::cli_options->build_snapshot) {
-    if (result->args().size() < 2) {
+  if (per_process::cli_options->per_isolate->build_snapshot) {
+    if (per_process::cli_options->per_isolate->build_snapshot_config.empty() &&
+        result->args().size() < 2) {
       fprintf(stderr,
               "--build-snapshot must be used with an entry point script.\n"
               "Usage: node --build-snapshot /path/to/entry.js\n");
@@ -1237,15 +1834,33 @@ static ExitCode StartInternal(int argc, char** argv) {
   }
 
   // Without --build-snapshot, we are in snapshot loading mode.
-  return LoadSnapshotDataAndRun(&snapshot_data, result.get());
+  if (!LoadSnapshotData(&snapshot_data)) {
+    return ExitCode::kStartupSnapshotFailure;
+  }
+  NodeMainInstance main_instance(snapshot_data,
+                                 uv_default_loop(),
+                                 per_process::v8_platform.Platform(),
+                                 result->args(),
+                                 result->exec_args());
+  return main_instance.Run();
 }
 
 int Start(int argc, char** argv) {
+#ifndef DISABLE_SINGLE_EXECUTABLE_APPLICATION
+  std::vector<std::string> errors;
+  std::tie(argc, argv) = sea::FixupArgsForSEA(argc, argv, &errors);
+  if (!errors.empty()) {
+    for (const std::string& error : errors) {
+      FPrintF(stderr, "%s: %s\n", argv[0], error);
+    }
+    return static_cast<int>(ExitCode::kInvalidCommandLineArgument);
+  }
+#endif
   return static_cast<int>(StartInternal(argc, argv));
 }
 
-int Stop(Environment* env) {
-  env->ExitEnv();
+int Stop(Environment* env, StopFlags::Flags flags) {
+  env->ExitEnv(flags);
   return 0;
 }
 

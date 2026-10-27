@@ -2,7 +2,7 @@
 const common = require('../common');
 common.skipIfInspectorDisabled();
 
-const { spawnSync } = require('child_process');
+const { spawnSyncAndExit } = require('../common/child_process');
 const { createServer } = require('http');
 const assert = require('assert');
 const tmpdir = require('../common/tmpdir');
@@ -23,22 +23,21 @@ function testOnServerListen(fn) {
 }
 
 function testChildProcess(getArgs, exitCode, options) {
-  testOnServerListen((server) => {
+  testOnServerListen(common.mustCall((server) => {
     const { port } = server.address();
-    const child = spawnSync(process.execPath, getArgs(port), options);
-    const stderr = child.stderr.toString().trim();
-    const stdout = child.stdout.toString().trim();
-    console.log('[STDERR]');
-    console.log(stderr);
-    console.log('[STDOUT]');
-    console.log(stdout);
-    const match = stderr.match(
-      /Starting inspector on 127\.0\.0\.1:(\d+) failed: address already in use/
-    );
-    assert.notStrictEqual(match, null);
-    assert.strictEqual(match[1], port + '');
-    assert.strictEqual(child.status, exitCode);
-  });
+    spawnSyncAndExit(process.execPath, getArgs(port), options, {
+      status: exitCode,
+      signal: null,
+      trim: true,
+      stderr: function(str) {
+        const match = str.match(
+          /Starting inspector on 127\.0\.0\.1:(\d+) failed: address already in use/
+        );
+        assert.notStrictEqual(match, null);
+        assert.strictEqual(match[1], port + '');
+      },
+    });
+  }));
 }
 
 tmpdir.refresh();
@@ -50,7 +49,7 @@ testChildProcess(
 testChildProcess(
   (port) => [`--inspect=${port}`, entry], 0);
 
-testOnServerListen((server) => {
+testOnServerListen(common.mustCall((server) => {
   const { port } = server.address();
   const worker = new Worker(entry, {
     execArgv: [`--inspect=${port}`]
@@ -61,4 +60,4 @@ testOnServerListen((server) => {
   worker.on('exit', common.mustCall((code) => {
     assert.strictEqual(code, 0);
   }));
-});
+}));

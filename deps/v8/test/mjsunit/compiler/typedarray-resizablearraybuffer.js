@@ -2,8 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --harmony-rab-gsab --allow-natives-syntax --turbofan
-// Flags: --no-always-turbofan --turbo-rab-gsab
+// Flags: --allow-natives-syntax --turbofan
 
 "use strict";
 
@@ -44,6 +43,15 @@ function asU32(index) {
   }
 }
 %NeverOptimizeFunction(asU32);
+
+function asF16(index) {
+  const start = index * 2;
+  const ab = new ArrayBuffer(2);
+  const ta = new Uint8Array(ab);
+  for (let i = 0; i < 2; ++i) ta[i] = start + i;
+  return new Float16Array(ab)[0];
+}
+%NeverOptimizeFunction(asF16);
 
 function asF32(index) {
   const start = index * 4;
@@ -184,6 +192,16 @@ function PrintBuffer(buffer) {
 }
 %NeverOptimizeFunction(PrintBuffer);
 
+// Detach a buffer to trip the protector up front, to prevent deopts in later
+// tests.
+(function() {
+  const ab = new ArrayBuffer(1);
+  const dv1 = new DataView(ab);
+  const dv2 = new DataView(ab);
+  %ArrayBufferDetach(ab);
+  assertThrows(() => dv1.byteLength, TypeError);
+})();
+
 (function() {
 for (let shared of [false, true]) {
   for (let length_tracking of [false, true]) {
@@ -226,13 +244,9 @@ for (let shared of [false, true]) {
         blen = Resize(ab, 9);
         assertEquals(blen, ByteLength(ta));
         assertEquals(Math.floor(blen / target.BYTES_PER_ELEMENT), Length(ta));
-        assertOptimized(ByteLength);
-        assertOptimized(Length);
         blen = Resize(ab, 24);
         assertEquals(blen, ByteLength(ta));
         assertEquals(Math.floor(blen / target.BYTES_PER_ELEMENT), Length(ta));
-        assertOptimized(ByteLength);
-        assertOptimized(Length);
 
         if (!shared) {
           %ArrayBufferDetach(ab);
@@ -449,6 +463,83 @@ assertEquals(9, ByteLength(dv));
 %OptimizeFunctionOnNextCall(ByteLength);
 assertEquals(9, ByteLength(dv));
 assertOptimized(ByteLength);
+})();
+
+const dataview_data_sizes = ['Int8', 'Uint8', 'Int16', 'Uint16', 'Int32',
+                             'Uint32', 'Float16', 'Float32', 'Float64', 'BigInt64',
+                             'BigUint64'];
+
+// Global variable used for DataViews; this is important for triggering some
+// optimizations.
+var dv;
+(function() {
+for (let use_global_var of [true, false]) {
+  for (let shared of [false, true]) {
+    for (let length_tracking of [false, true]) {
+      for (let with_offset of [false, true]) {
+        for (let data_size of dataview_data_sizes) {
+          const test_case = `Testing: Get_${
+              data_size}_${
+              shared ? 'GSAB' : 'RAB'}_${
+              length_tracking ?
+                  'LengthTracking' :
+                  'FixedLength'}${with_offset ? 'WithOffset' : ''}_${
+              use_global_var ? 'UseGlobalVar' : ''}_DataView`;
+          // console.log(test_case);
+          const is_bigint = data_size.startsWith('Big');
+          const expected_value = is_bigint ? 0n : 0;
+
+          const get_code = 'return dv.get' + data_size + '(0); // ' + test_case;
+          const Get = use_global_var ?
+              new Function(get_code) : new Function('dv', get_code);
+
+          const offset = with_offset ? 8 : 0;
+
+          let blen = 8;  // Enough for one element.
+          const fixed_blen = length_tracking ? undefined : blen;
+          const ab = CreateBuffer(shared, 8*10, 8*20);
+          // Assign to the global var.
+          dv = new DataView(ab, offset, fixed_blen);
+          const Resize = MakeResize(DataView, shared, offset, fixed_blen);
+
+          assertUnoptimized(Get);
+          %PrepareFunctionForOptimization(Get);
+          assertEquals(expected_value, Get(dv));
+          assertEquals(expected_value, Get(dv));
+          %OptimizeFunctionOnNextCall(Get);
+          assertEquals(expected_value, Get(dv));
+          assertOptimized(Get);
+
+          // Enough for one element or more (even with offset).
+          blen = Resize(ab, 8 + offset);
+          assertEquals(expected_value, Get(dv));
+          assertOptimized(Get);
+
+          blen = Resize(ab, 0);  // Not enough for one element.
+          if (shared) {
+            assertEquals(expected_value, Get(dv));
+          } else {
+            if (!length_tracking || with_offset) {
+              // DataView is out of bounds.
+              assertThrows(() => { Get(dv); }, TypeError);
+            } else {
+              // DataView is valid, the index is out of bounds.
+              assertThrows(() => { Get(dv); }, RangeError);
+            }
+          }
+
+          blen = Resize(ab, 64);
+          assertEquals(expected_value, Get(dv));
+
+          if (!shared) {
+            %ArrayBufferDetach(ab);
+            assertThrows(() => { Get(dv); }, TypeError);
+          }
+        }
+      }
+    }
+  }
+}
 })();
 
 (function() {

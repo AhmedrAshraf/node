@@ -3,14 +3,20 @@ const common = require('../common');
 
 // Test for https://github.com/nodejs/node/issues/40814
 
-if (!common.hasCrypto)
+if (!common.hasCrypto) {
   common.skip('missing crypto');
+}
 
-if (!common.hasOpenSSL3)
-  common.skip('only openssl3'); // https://github.com/nodejs/node/pull/42793#issuecomment-1107491901
+const { isBoringSSL } = require('../common/crypto');
+
+if (isBoringSSL) {
+  common.skip('this test is not supported with BoringSSL'); // https://github.com/nodejs/node/pull/42793#issuecomment-1107491901
+}
 
 const assert = require('assert');
 const crypto = require('crypto');
+
+const passphrase = 'password';
 
 const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
   modulusLength: 2048,
@@ -22,7 +28,7 @@ const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
     type: 'pkcs8',
     format: 'pem',
     cipher: 'aes-128-ecb',
-    passphrase: 'abcdef'
+    passphrase
   }
 });
 assert.notStrictEqual(privateKey.toString(), '');
@@ -31,7 +37,7 @@ const msg = 'The quick brown fox jumps over the lazy dog';
 
 const encryptedString = crypto.privateEncrypt({
   key: privateKey,
-  passphrase: 'abcdef'
+  passphrase
 }, Buffer.from(msg)).toString('base64');
 const decryptedString = crypto.publicDecrypt(publicKey, Buffer.from(encryptedString, 'base64')).toString();
 console.log(`Encrypted: ${encryptedString}`);

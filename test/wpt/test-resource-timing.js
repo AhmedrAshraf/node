@@ -1,5 +1,5 @@
 'use strict';
-require('../common');
+
 const { WPTRunner } = require('../common/wpt');
 
 const runner = new WPTRunner('resource-timing');
@@ -25,7 +25,7 @@ runner.setInitScript(`
     finalNetworkResponseStartTime: 0,
     encodedBodySize: 0,
     decodedBodySize: 0,
-  }, 'https://nodejs.org', '', global, '');
+  }, 'https://nodejs.org', '', global, '', {}, 200, '');
 `);
 
 runner.runJsTests();

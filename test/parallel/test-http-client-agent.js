@@ -29,7 +29,7 @@ let name;
 const max = 3;
 const agent = new http.Agent();
 
-const server = http.Server(common.mustCall((req, res) => {
+const server = new http.Server(common.mustCall((req, res) => {
   if (req.url === '/0') {
     setTimeout(common.mustCall(() => {
       res.writeHead(200);
@@ -46,18 +46,18 @@ server.listen(0, common.mustCall(() => {
     request(i);
 }));
 
-const countdown = new Countdown(max, () => {
+const countdown = new Countdown(max, common.mustCall(() => {
   assert(!(name in agent.sockets));
   assert(!(name in agent.requests));
   server.close();
-});
+}));
 
 function request(i) {
   const req = http.get({
     port: server.address().port,
     path: `/${i}`,
     agent
-  }, function(res) {
+  }, common.mustCall((res) => {
     const socket = req.socket;
     socket.on('close', common.mustCall(() => {
       countdown.dec();
@@ -67,5 +67,5 @@ function request(i) {
       }
     }));
     res.resume();
-  });
+  }));
 }

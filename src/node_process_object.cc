@@ -12,8 +12,8 @@
 #include <climits>  // PATH_MAX
 
 namespace node {
+using v8::Boolean;
 using v8::Context;
-using v8::DEFAULT;
 using v8::EscapableHandleScope;
 using v8::Function;
 using v8::FunctionCallbackInfo;
@@ -23,26 +23,25 @@ using v8::Isolate;
 using v8::Local;
 using v8::MaybeLocal;
 using v8::Name;
-using v8::NewStringType;
 using v8::None;
 using v8::Object;
 using v8::PropertyCallbackInfo;
 using v8::SideEffectType;
-using v8::String;
 using v8::Value;
 
 static void ProcessTitleGetter(Local<Name> property,
                                const PropertyCallbackInfo<Value>& info) {
   std::string title = GetProcessTitle("node");
-  info.GetReturnValue().Set(
-      String::NewFromUtf8(info.GetIsolate(), title.data(),
-                          NewStringType::kNormal, title.size())
-      .ToLocalChecked());
+  Local<Value> ret;
+  auto isolate = info.GetIsolate();
+  if (ToV8Value(isolate->GetCurrentContext(), title, isolate).ToLocal(&ret)) {
+    info.GetReturnValue().Set(ret);
+  }
 }
 
 static void ProcessTitleSetter(Local<Name> property,
                                Local<Value> value,
-                               const PropertyCallbackInfo<void>& info) {
+                               const PropertyCallbackInfo<Boolean>& info) {
   node::Utf8Value title(info.GetIsolate(), value);
   TRACE_EVENT_METADATA1(
       "__metadata", "process_name", "name", TRACE_STR_COPY(*title));
@@ -59,7 +58,7 @@ static void DebugPortGetter(Local<Name> property,
 
 static void DebugPortSetter(Local<Name> property,
                             Local<Value> value,
-                            const PropertyCallbackInfo<void>& info) {
+                            const PropertyCallbackInfo<Boolean>& info) {
   Environment* env = Environment::GetCurrent(info);
   int32_t port = value->Int32Value(env->context()).FromMaybe(0);
 
@@ -76,6 +75,23 @@ static void DebugPortSetter(Local<Name> property,
 static void GetParentProcessId(Local<Name> property,
                                const PropertyCallbackInfo<Value>& info) {
   info.GetReturnValue().Set(uv_os_getppid());
+}
+
+static void SetVersions(Isolate* isolate, Local<Object> versions) {
+  Local<Context> context = isolate->GetCurrentContext();
+
+  // Node.js version is always on the top
+  READONLY_STRING_PROPERTY(
+      versions, "node", per_process::metadata.versions.node);
+
+  for (const auto& version : per_process::metadata.versions.pairs()) {
+    versions
+        ->DefineOwnProperty(context,
+                            OneByteString(isolate, version.first),
+                            OneByteString(isolate, version.second),
+                            v8::ReadOnly)
+        .Check();
+  }
 }
 
 MaybeLocal<Object> CreateProcessObject(Realm* realm) {
@@ -107,15 +123,8 @@ MaybeLocal<Object> CreateProcessObject(Realm* realm) {
 
   // process.versions
   Local<Object> versions = Object::New(isolate);
+  SetVersions(isolate, versions);
   READONLY_PROPERTY(process, "versions", versions);
-
-#define V(key)                                                                 \
-  if (!per_process::metadata.versions.key.empty()) {                           \
-    READONLY_STRING_PROPERTY(                                                  \
-        versions, #key, per_process::metadata.versions.key);                   \
-  }
-  NODE_VERSIONS_KEYS(V)
-#undef V
 
   // process.arch
   READONLY_STRING_PROPERTY(process, "arch", per_process::metadata.arch);
@@ -158,34 +167,45 @@ void PatchProcessObject(const FunctionCallbackInfo<Value>& args) {
 
   // process.title
   CHECK(process
-            ->SetAccessor(
+            ->SetNativeDataProperty(
                 context,
                 FIXED_ONE_BYTE_STRING(isolate, "title"),
                 ProcessTitleGetter,
                 env->owns_process_state() ? ProcessTitleSetter : nullptr,
                 Local<Value>(),
-                DEFAULT,
                 None,
                 SideEffectType::kHasNoSideEffect)
             .FromJust());
 
   // process.argv
-  process->Set(context,
-               FIXED_ONE_BYTE_STRING(isolate, "argv"),
-               ToV8Value(context, env->argv()).ToLocalChecked()).Check();
+  Local<Value> val;
+  if (!ToV8Value(context, env->argv()).ToLocal(&val) ||
+      !process->Set(context, FIXED_ONE_BYTE_STRING(isolate, "argv"), val)
+           .IsJust()) {
+    return;
+  }
 
   // process.execArgv
-  process->Set(context,
-               FIXED_ONE_BYTE_STRING(isolate, "execArgv"),
-               ToV8Value(context, env->exec_argv())
-                   .ToLocalChecked()).Check();
+  if (!ToV8Value(context, env->exec_argv()).ToLocal(&val) ||
+      !process->Set(context, FIXED_ONE_BYTE_STRING(isolate, "execArgv"), val)
+           .IsJust()) {
+    return;
+  }
 
   READONLY_PROPERTY(process, "pid",
                     Integer::New(isolate, uv_os_getpid()));
 
-  CHECK(process->SetAccessor(context,
-                             FIXED_ONE_BYTE_STRING(isolate, "ppid"),
-                             GetParentProcessId).FromJust());
+  if (!process
+           ->SetNativeDataProperty(context,
+                                   FIXED_ONE_BYTE_STRING(isolate, "ppid"),
+                                   GetParentProcessId,
+                                   nullptr,
+                                   Local<Value>(),
+                                   None,
+                                   SideEffectType::kHasNoSideEffect)
+           .IsJust()) {
+    return;
+  }
 
   // --security-revert flags
 #define V(code, _, __)                                                        \
@@ -198,24 +218,30 @@ void PatchProcessObject(const FunctionCallbackInfo<Value>& args) {
 #undef V
 
   // process.execPath
-  process
-      ->Set(context,
-            FIXED_ONE_BYTE_STRING(isolate, "execPath"),
-            String::NewFromUtf8(isolate,
-                                env->exec_path().c_str(),
-                                NewStringType::kInternalized,
-                                env->exec_path().size())
-                .ToLocalChecked())
-      .Check();
+  if (!ToV8Value(context, env->exec_path(), isolate).ToLocal(&val) ||
+      !process->Set(context, FIXED_ONE_BYTE_STRING(isolate, "execPath"), val)
+           .IsJust()) {
+    return;
+  }
 
   // process.debugPort
-  CHECK(process
-            ->SetAccessor(context,
-                          FIXED_ONE_BYTE_STRING(isolate, "debugPort"),
-                          DebugPortGetter,
-                          env->owns_process_state() ? DebugPortSetter : nullptr,
-                          Local<Value>())
-            .FromJust());
+  if (!process
+           ->SetNativeDataProperty(
+               context,
+               FIXED_ONE_BYTE_STRING(isolate, "debugPort"),
+               DebugPortGetter,
+               env->owns_process_state() ? DebugPortSetter : nullptr,
+               Local<Value>(),
+               None,
+               SideEffectType::kHasNoSideEffect)
+           .IsJust()) {
+    return;
+  }
+
+  // process.versions
+  Local<Object> versions = Object::New(isolate);
+  SetVersions(isolate, versions);
+  READONLY_PROPERTY(process, "versions", versions);
 }
 
 void RegisterProcessExternalReferences(ExternalReferenceRegistry* registry) {

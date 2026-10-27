@@ -8,7 +8,8 @@ const http = require('http');
 // when passed as the value of either options.hostname or options.host
 const vals = [{}, [], NaN, Infinity, -Infinity, true, false, 1, 0, new Date()];
 
-vals.forEach((v) => {
+
+for (const v of vals) {
   const received = common.invalidArgTypeHelper(v);
   assert.throws(
     () => http.request({ hostname: v }),
@@ -31,12 +32,13 @@ vals.forEach((v) => {
                received
     }
   );
-});
+}
 
 // These values are OK and should not throw synchronously.
 // Only testing for 'hostname' validation so ignore connection errors.
 const dontCare = () => {};
-['', undefined, null].forEach((v) => {
+const values = ['', undefined, null];
+for (const v of values) {
   http.request({ hostname: v }).on('error', dontCare).end();
   http.request({ host: v }).on('error', dontCare).end();
-});
+}

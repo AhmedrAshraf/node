@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -11,10 +11,10 @@
 
 #include <stdio.h>
 #include <string.h>
-#include "e_os.h" /* struct stat */
+#include "internal/e_os.h" /* struct stat */
 #ifdef __TANDEM
-# include <sys/types.h> /* needed for stat.h */
-# include <sys/stat.h> /* struct stat */
+#include <sys/types.h> /* needed for stat.h */
+#include <sys/stat.h> /* struct stat */
 #endif
 #include "internal/cryptlib.h"
 #include "internal/o_dir.h"
@@ -26,21 +26,21 @@
 #include <openssl/buffer.h>
 #include <openssl/err.h>
 #ifndef OPENSSL_NO_POSIX_IO
-# include <sys/stat.h>
-# ifdef _WIN32
-#  define stat    _stat
-# endif
+#include <sys/stat.h>
+#ifdef _WIN32
+#define stat _stat
+#endif
 #endif
 
 #ifndef S_ISDIR
-# define S_ISDIR(a) (((a) & S_IFMT) == S_IFDIR)
+#define S_ISDIR(a) (((a) & S_IFMT) == S_IFDIR)
 #endif
 
 /*
  * The maximum length we can grow a value to after variable expansion. 64k
  * should be more than enough for all reasonable uses.
  */
-#define MAX_CONF_VALUE_LENGTH       65536
+#define MAX_CONF_VALUE_LENGTH 65536
 
 static int is_keytype(const CONF *conf, char c, unsigned short type);
 static char *eat_ws(CONF *conf, char *p);
@@ -50,10 +50,10 @@ static void clear_comments(CONF *conf, char *p);
 static int str_copy(CONF *conf, char *section, char **to, char *from);
 static char *scan_quote(CONF *conf, char *p);
 static char *scan_dquote(CONF *conf, char *p);
-#define scan_esc(conf,p)        (((IS_EOF((conf),(p)[1]))?((p)+1):((p)+2)))
+#define scan_esc(conf, p) (((IS_EOF((conf), (p)[1])) ? ((p) + 1) : ((p) + 2)))
 #ifndef OPENSSL_NO_POSIX_IO
 static BIO *process_include(char *include, OPENSSL_DIR_CTX **dirctx,
-                            char **dirpath);
+    char **dirpath);
 static BIO *get_next_file(const char *path, OPENSSL_DIR_CTX **dirctx);
 #endif
 
@@ -188,15 +188,14 @@ static int def_load(CONF *conf, const char *name, long *line)
     return ret;
 }
 
-
 /* Parse a boolean value and fill in *flag. Return 0 on error. */
 static int parsebool(const char *pval, int *flag)
 {
     if (OPENSSL_strcasecmp(pval, "on") == 0
-            || OPENSSL_strcasecmp(pval, "true") == 0) {
+        || OPENSSL_strcasecmp(pval, "true") == 0) {
         *flag = 1;
     } else if (OPENSSL_strcasecmp(pval, "off") == 0
-            || OPENSSL_strcasecmp(pval, "false") == 0) {
+        || OPENSSL_strcasecmp(pval, "false") == 0) {
         *flag = 0;
     } else {
         ERR_raise(ERR_LIB_CONF, CONF_R_INVALID_PRAGMA);
@@ -208,7 +207,7 @@ static int parsebool(const char *pval, int *flag)
 static int def_load_bio(CONF *conf, BIO *in, long *line)
 {
 /* The macro BUFSIZE conflicts with a system macro in VxWorks */
-#define CONFBUFSIZE     512
+#define CONFBUFSIZE 512
     int bufnum = 0, i, ii;
     BUF_MEM *buff = NULL;
     char *s, *p, *end;
@@ -226,6 +225,9 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
     char *dirpath = NULL;
     OPENSSL_DIR_CTX *dirctx = NULL;
 #endif
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    int numincludes = 0;
+#endif
 
     if ((buff = BUF_MEM_new()) == NULL) {
         ERR_raise(ERR_LIB_CONF, ERR_R_BUF_LIB);
@@ -233,13 +235,11 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
     }
 
     section = OPENSSL_strdup("default");
-    if (section == NULL) {
-        ERR_raise(ERR_LIB_CONF, ERR_R_MALLOC_FAILURE);
+    if (section == NULL)
         goto err;
-    }
 
     if (_CONF_new_data(conf) == 0) {
-        ERR_raise(ERR_LIB_CONF, ERR_R_MALLOC_FAILURE);
+        ERR_raise(ERR_LIB_CONF, ERR_R_CONF_LIB);
         goto err;
     }
 
@@ -258,15 +258,15 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
         }
         p = &(buff->data[bufnum]);
         *p = '\0';
- read_retry:
+    read_retry:
         if (in != NULL && BIO_gets(in, p, CONFBUFSIZE - 1) < 0)
             goto err;
         p[CONFBUFSIZE - 1] = '\0';
-        ii = i = strlen(p);
+        ii = i = (int)strlen(p);
         if (first_call) {
             /* Other BOMs imply unsupported multibyte encoding,
              * so don't strip them and let the error raise */
-            const unsigned char utf8_bom[3] = {0xEF, 0xBB, 0xBF};
+            const unsigned char utf8_bom[3] = { 0xEF, 0xBB, 0xBF };
 
             if (i >= 3 && memcmp(p, utf8_bom, 3) == 0) {
                 memmove(p, p + 3, i - 3);
@@ -316,10 +316,10 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
          * we removed some trailing stuff so there is a new line on the end.
          */
         if (ii && i == ii)
-            again = 1;          /* long line */
+            again = 1; /* long line */
         else {
             p[i] = '\0';
-            eline++;            /* another input line */
+            eline++; /* another input line */
         }
 
         /* we now have a line with trailing \r\n removed */
@@ -329,7 +329,7 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
 
         v = NULL;
         /* check for line continuation */
-        if (bufnum >= 1) {
+        if (!again && bufnum >= 1) {
             /*
              * If we have bytes and the last char '\\' and second last char
              * is not '\\'
@@ -348,14 +348,14 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
         clear_comments(conf, buf);
         s = eat_ws(conf, buf);
         if (IS_EOF(conf, *s))
-            continue;           /* blank line */
+            continue; /* blank line */
         if (*s == '[') {
             char *ss;
 
             s++;
             start = eat_ws(conf, s);
             ss = start;
- again:
+        again:
             end = eat_alpha_numeric(conf, ss);
             p = eat_ws(conf, end);
             if (*p != ']') {
@@ -389,8 +389,8 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
                 psection = section;
             }
             p = eat_ws(conf, end);
-            if (strncmp(pname, ".pragma", 7) == 0
-                && (p != pname + 7 || *p == '=')) {
+            if (CHECK_AND_SKIP_PREFIX(pname, ".pragma")
+                && (p != pname || *p == '=')) {
                 char *pval;
 
                 if (*p == '=') {
@@ -425,22 +425,34 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
                         goto err;
                 } else if (strcmp(p, "includedir") == 0) {
                     OPENSSL_free(conf->includedir);
-                    if ((conf->includedir = OPENSSL_strdup(pval)) == NULL) {
-                        ERR_raise(ERR_LIB_CONF, ERR_R_MALLOC_FAILURE);
+                    if ((conf->includedir = OPENSSL_strdup(pval)) == NULL)
                         goto err;
-                    }
                 }
 
                 /*
                  * We *ignore* any unknown pragma.
                  */
                 continue;
-            } else if (strncmp(pname, ".include", 8) == 0
-                && (p != pname + 8 || *p == '=')) {
+            } else if (CHECK_AND_SKIP_PREFIX(pname, ".include")
+                && (p != pname || *p == '=')) {
                 char *include = NULL;
                 BIO *next;
                 const char *include_dir = ossl_safe_getenv("OPENSSL_CONF_INCLUDE");
                 char *include_path = NULL;
+
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+                /*
+                 * The include processing below can cause the "conf" fuzzer to
+                 * timeout due to the fuzzer inserting large and complicated
+                 * includes - with a large amount of time spent in
+                 * OPENSSL_strlcat/OPENSSL_strcpy. This is not a security
+                 * concern because config files should never come from untrusted
+                 * sources. We just set an arbitrary limit on the allowed
+                 * number of includes when fuzzing to prevent this timeout.
+                 */
+                if (numincludes++ > 10)
+                    goto err;
+#endif
 
                 if (include_dir == NULL)
                     include_dir = conf->includedir;
@@ -458,7 +470,6 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
 
                     include_path = OPENSSL_malloc(newlen);
                     if (include_path == NULL) {
-                        ERR_raise(ERR_LIB_CONF, ERR_R_MALLOC_FAILURE);
                         OPENSSL_free(include);
                         goto err;
                     }
@@ -473,7 +484,7 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
                 }
 
                 if (conf->flag_abspath
-                        && !ossl_is_absolute_path(include_path)) {
+                    && !ossl_is_absolute_path(include_path)) {
                     ERR_raise(ERR_LIB_CONF, CONF_R_RELATIVE_PATH);
                     OPENSSL_free(include_path);
                     goto err;
@@ -495,13 +506,13 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
                     /* push the currently processing BIO onto stack */
                     if (biosk == NULL) {
                         if ((biosk = sk_BIO_new_null()) == NULL) {
-                            ERR_raise(ERR_LIB_CONF, ERR_R_MALLOC_FAILURE);
+                            ERR_raise(ERR_LIB_CONF, ERR_R_CRYPTO_LIB);
                             BIO_free(next);
                             goto err;
                         }
                     }
                     if (!sk_BIO_push(biosk, in)) {
-                        ERR_raise(ERR_LIB_CONF, ERR_R_MALLOC_FAILURE);
+                        ERR_raise(ERR_LIB_CONF, ERR_R_CRYPTO_LIB);
                         BIO_free(next);
                         goto err;
                     }
@@ -511,7 +522,7 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
                 continue;
             } else if (*p != '=') {
                 ERR_raise_data(ERR_LIB_CONF, CONF_R_MISSING_EQUAL_SIGN,
-                               "HERE-->%s", p);
+                    "HERE-->%s", p);
                 goto err;
             }
             *end = '\0';
@@ -519,16 +530,12 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
             start = eat_ws(conf, p);
             trim_ws(conf, start);
 
-            if ((v = OPENSSL_malloc(sizeof(*v))) == NULL) {
-                ERR_raise(ERR_LIB_CONF, ERR_R_MALLOC_FAILURE);
+            if ((v = OPENSSL_malloc(sizeof(*v))) == NULL)
                 goto err;
-            }
             v->name = OPENSSL_strdup(pname);
             v->value = NULL;
-            if (v->name == NULL) {
-                ERR_raise(ERR_LIB_CONF, ERR_R_MALLOC_FAILURE);
+            if (v->name == NULL)
                 goto err;
-            }
             if (!str_copy(conf, psection, &(v->value), start))
                 goto err;
 
@@ -538,13 +545,13 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
                     tv = _CONF_new_section(conf, psection);
                 if (tv == NULL) {
                     ERR_raise(ERR_LIB_CONF,
-                              CONF_R_UNABLE_TO_CREATE_NEW_SECTION);
+                        CONF_R_UNABLE_TO_CREATE_NEW_SECTION);
                     goto err;
                 }
             } else
                 tv = sv;
             if (_CONF_add_string(conf, tv, v) == 0) {
-                ERR_raise(ERR_LIB_CONF, ERR_R_MALLOC_FAILURE);
+                ERR_raise(ERR_LIB_CONF, ERR_R_CONF_LIB);
                 goto err;
             }
             v = NULL;
@@ -559,7 +566,7 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
     sk_BIO_free(biosk);
     return 1;
 
- err:
+err:
     BUF_MEM_free(buff);
     OPENSSL_free(section);
     /*
@@ -580,7 +587,7 @@ static int def_load_bio(CONF *conf, BIO *in, long *line)
 #endif
     if (line != NULL)
         *line = eline;
-    BIO_snprintf(btmp, sizeof(btmp), "%ld", eline);
+    snprintf(btmp, sizeof(btmp), "%ld", eline);
     ERR_add_error_data(2, "line ", btmp);
     if (h != conf->data) {
         CONF_free(conf->data);
@@ -633,15 +640,14 @@ static void clear_comments(CONF *conf, char *p)
 
 static int str_copy(CONF *conf, char *section, char **pto, char *from)
 {
-    int q, r, rr = 0, to = 0, len = 0;
+    int q, r, rr = 0, to = 0;
     char *s, *e, *rp, *p, *rrp, *np, *cp, v;
     BUF_MEM *buf;
 
     if ((buf = BUF_MEM_new()) == NULL)
         return 0;
 
-    len = strlen(from) + 1;
-    if (!BUF_MEM_grow(buf, len))
+    if (!BUF_MEM_grow(buf, strlen(from) + 1))
         goto err;
 
     for (;;) {
@@ -690,9 +696,9 @@ static int str_copy(CONF *conf, char *section, char **pto, char *from)
         } else if (IS_EOF(conf, *from))
             break;
         else if (*from == '$'
-                 && (!conf->flag_dollarid
-                     || from[1] == '{'
-                     || from[1] == '(')) {
+            && (!conf->flag_dollarid
+                || from[1] == '{'
+                || from[1] == '(')) {
             size_t newsize;
 
             /* try to expand it */
@@ -710,7 +716,7 @@ static int str_copy(CONF *conf, char *section, char **pto, char *from)
             cp = section;
             e = np = s;
             while (IS_ALNUM(conf, *e)
-                   || (conf->flag_dollarid && IS_DOLLAR(conf, *e)))
+                || (conf->flag_dollarid && IS_DOLLAR(conf, *e)))
                 e++;
             if ((e[0] == ':') && (e[1] == ':')) {
                 cp = np;
@@ -720,7 +726,7 @@ static int str_copy(CONF *conf, char *section, char **pto, char *from)
                 e += 2;
                 np = e;
                 while (IS_ALNUM(conf, *e)
-                       || (conf->flag_dollarid && IS_DOLLAR(conf, *e)))
+                    || (conf->flag_dollarid && IS_DOLLAR(conf, *e)))
                     e++;
             }
             r = *e;
@@ -757,17 +763,12 @@ static int str_copy(CONF *conf, char *section, char **pto, char *from)
                 goto err;
             }
             if (!BUF_MEM_grow_clean(buf, newsize)) {
-                ERR_raise(ERR_LIB_CONF, ERR_R_MALLOC_FAILURE);
+                ERR_raise(ERR_LIB_CONF, ERR_R_BUF_LIB);
                 goto err;
             }
             while (*p)
                 buf->data[to++] = *(p++);
 
-            /*
-             * Since we change the pointer 'from', we also have to change the
-             * perceived length of the string it points at.  /RL
-             */
-            len -= e - from;
             from = e;
 
             /*
@@ -784,7 +785,7 @@ static int str_copy(CONF *conf, char *section, char **pto, char *from)
     *pto = buf->data;
     OPENSSL_free(buf);
     return 1;
- err:
+err:
     BUF_MEM_free(buf);
     return 0;
 }
@@ -796,7 +797,7 @@ static int str_copy(CONF *conf, char *section, char **pto, char *from)
  * also an opened directory context and the include path.
  */
 static BIO *process_include(char *include, OPENSSL_DIR_CTX **dirctx,
-                            char **dirpath)
+    char **dirpath)
 {
     struct stat st;
     BIO *next;
@@ -810,7 +811,7 @@ static BIO *process_include(char *include, OPENSSL_DIR_CTX **dirctx,
     if (S_ISDIR(st.st_mode)) {
         if (*dirctx != NULL) {
             ERR_raise_data(ERR_LIB_CONF, CONF_R_RECURSIVE_DIRECTORY_INCLUDE,
-                           "%s", include);
+                "%s", include);
             return NULL;
         }
         /* a directory, load its contents */
@@ -838,21 +839,18 @@ static BIO *get_next_file(const char *path, OPENSSL_DIR_CTX **dirctx)
 
         namelen = strlen(filename);
 
-
         if ((namelen > 5
-             && OPENSSL_strcasecmp(filename + namelen - 5, ".conf") == 0)
-             || (namelen > 4
-                 && OPENSSL_strcasecmp(filename + namelen - 4, ".cnf") == 0)) {
+                && OPENSSL_strcasecmp(filename + namelen - 5, ".conf") == 0)
+            || (namelen > 4
+                && OPENSSL_strcasecmp(filename + namelen - 4, ".cnf") == 0)) {
             size_t newlen;
             char *newpath;
             BIO *bio;
 
             newlen = pathlen + namelen + 2;
             newpath = OPENSSL_zalloc(newlen);
-            if (newpath == NULL) {
-                ERR_raise(ERR_LIB_CONF, ERR_R_MALLOC_FAILURE);
+            if (newpath == NULL)
                 break;
-            }
 #ifdef OPENSSL_SYS_VMS
             /*
              * If the given path isn't clear VMS syntax,
@@ -886,16 +884,16 @@ static BIO *get_next_file(const char *path, OPENSSL_DIR_CTX **dirctx)
 
 static int is_keytype(const CONF *conf, char c, unsigned short type)
 {
-    const unsigned short * keytypes = (const unsigned short *) conf->meth_data;
+    const unsigned short *keytypes = (const unsigned short *)conf->meth_data;
     unsigned char key = (unsigned char)c;
 
 #ifdef CHARSET_EBCDIC
-# if CHAR_BIT > 8
+#if CHAR_BIT > 8
     if (key > 255) {
         /* key is out of range for os_toascii table */
         return 0;
     }
-# endif
+#endif
     /* convert key from ebcdic to ascii */
     key = os_toascii[key];
 #endif
@@ -936,7 +934,7 @@ static char *eat_alpha_numeric(CONF *conf, char *p)
             continue;
         }
         if (!(IS_ALNUM_PUNCT(conf, *p)
-              || (conf->flag_dollarid && IS_DOLLAR(conf, *p))))
+                || (conf->flag_dollarid && IS_DOLLAR(conf, *p))))
             return p;
         p++;
     }

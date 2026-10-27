@@ -33,7 +33,7 @@ const cluster = require('cluster');
 
 if (cluster.isWorker) {
   const http = require('http');
-  const server = http.Server(() => { });
+  const server = new http.Server(() => { });
 
   server.once('listening', common.mustCall());
   server.listen(0, '127.0.0.1');
@@ -111,7 +111,7 @@ function checkResults(expected_results, results) {
     const expected = expected_results[k];
 
     assert.strictEqual(
-      actual, expected && expected.length ? expected[0] : expected,
+      actual, expected?.length ? expected[0] : expected,
       `${expected[1] || ''} [expected: ${expected[0]} / actual: ${actual}]`);
   }
 }

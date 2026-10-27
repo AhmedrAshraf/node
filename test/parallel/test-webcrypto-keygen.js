@@ -6,13 +6,19 @@ const common = require('../common');
 if (!common.hasCrypto)
   common.skip('missing crypto');
 
+const { hasOpenSSL, hasFIPS, isBoringSSL } = require('../common/crypto');
+
 const assert = require('assert');
 const { types: { isCryptoKey } } = require('util');
 const {
-  webcrypto: { subtle },
   createSecretKey,
+  getFips,
   KeyObject,
 } = require('crypto');
+const { subtle } = globalThis.crypto;
+const fips3 = hasFIPS(3);
+const fips35 = hasFIPS(3, 5);
+const rsaMinimumModulusLength = getFips() === 1 ? 2048 : 512;
 
 const { bigIntArrayToUnsignedBigInt } = require('internal/crypto/util');
 
@@ -57,14 +63,6 @@ const vectors = {
       'unwrapKey',
     ],
   },
-  'AES-KW': {
-    algorithm: { length: 256 },
-    result: 'CryptoKey',
-    usages: [
-      'wrapKey',
-      'unwrapKey',
-    ],
-  },
   'HMAC': {
     algorithm: { length: 256, hash: 'SHA-256' },
     result: 'CryptoKey',
@@ -75,7 +73,7 @@ const vectors = {
   },
   'RSASSA-PKCS1-v1_5': {
     algorithm: {
-      modulusLength: 1024,
+      modulusLength: getFips() === 1 ? 2048 : 1024,
       publicExponent: new Uint8Array([1, 0, 1]),
       hash: 'SHA-256'
     },
@@ -87,7 +85,7 @@ const vectors = {
   },
   'RSA-PSS': {
     algorithm: {
-      modulusLength: 1024,
+      modulusLength: getFips() === 1 ? 2048 : 1024,
       publicExponent: new Uint8Array([1, 0, 1]),
       hash: 'SHA-256'
     },
@@ -99,7 +97,7 @@ const vectors = {
   },
   'RSA-OAEP': {
     algorithm: {
-      modulusLength: 1024,
+      modulusLength: getFips() === 1 ? 2048 : 1024,
       publicExponent: new Uint8Array([1, 0, 1]),
       hash: 'SHA-256'
     },
@@ -134,13 +132,6 @@ const vectors = {
       'verify',
     ],
   },
-  'Ed448': {
-    result: 'CryptoKeyPair',
-    usages: [
-      'sign',
-      'verify',
-    ],
-  },
   'X25519': {
     result: 'CryptoKeyPair',
     usages: [
@@ -148,14 +139,78 @@ const vectors = {
       'deriveBits',
     ],
   },
-  'X448': {
+  'AES-KW': {
+    algorithm: { length: 256 },
+    result: 'CryptoKey',
+    usages: [
+      'wrapKey',
+      'unwrapKey',
+    ],
+  },
+  'ChaCha20-Poly1305': {
+    result: 'CryptoKey',
+    usages: [
+      'encrypt',
+      'decrypt',
+      'wrapKey',
+      'unwrapKey',
+    ],
+  },
+};
+
+if (!isBoringSSL) {
+  vectors.Ed448 = {
+    result: 'CryptoKeyPair',
+    usages: [
+      'sign',
+      'verify',
+    ],
+  };
+  vectors.X448 = {
     result: 'CryptoKeyPair',
     usages: [
       'deriveKey',
       'deriveBits',
     ],
-  },
-};
+  };
+} else {
+  common.printSkipMessage('Skipping unsupported test cases');
+}
+
+if (!isBoringSSL) {
+  vectors['AES-OCB'] = {
+    algorithm: { length: 256 },
+    result: 'CryptoKey',
+    usages: [
+      'encrypt',
+      'decrypt',
+      'wrapKey',
+      'unwrapKey',
+    ],
+  };
+
+  for (const name of ['KMAC128', 'KMAC256']) {
+    vectors[name] = {
+      result: 'CryptoKey',
+      usages: [
+        'sign',
+        'verify',
+      ],
+    };
+  }
+}
+
+if (hasOpenSSL(3, 5) || isBoringSSL) {
+  for (const name of ['ML-DSA-44', 'ML-DSA-65', 'ML-DSA-87']) {
+    vectors[name] = {
+      result: 'CryptoKeyPair',
+      usages: [
+        'sign',
+        'verify',
+      ],
+    };
+  }
+}
 
 // Test invalid algorithms
 {
@@ -163,9 +218,7 @@ const vectors = {
     return assert.rejects(
       // The extractable and usages values are invalid here also,
       // but the unrecognized algorithm name should be caught first.
-      subtle.generateKey(algorithm, 7, ['zebra']), {
-        message: /Unrecognized name/
-      });
+      subtle.generateKey(algorithm, 7, []), { name: 'NotSupportedError' });
   }
 
   const tests = [
@@ -198,6 +251,20 @@ const vectors = {
 // Test bad usages
 {
   async function test(name) {
+    if (fips3 && (name === 'ChaCha20-Poly1305' || name === 'AES-OCB')) {
+      await assert.rejects(
+        subtle.generateKey({ name }, true, []),
+        { name: 'NotSupportedError', message: 'Unrecognized algorithm name' });
+      return;
+    }
+
+    if (fips35 && (name === 'X25519' || name === 'X448')) {
+      await assert.rejects(
+        subtle.generateKey({ name }, true, ['deriveBits']),
+        { name: 'NotSupportedError', message: 'Unrecognized algorithm name' });
+      return;
+    }
+
     await assert.rejects(
       subtle.generateKey(
         {
@@ -248,6 +315,17 @@ const vectors = {
   Promise.all(tests).then(common.mustCall());
 }
 
+// Test CryptoKeyPair prototype
+{
+  subtle.generateKey(
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    true,
+    ['sign', 'verify'])
+    .then(common.mustCall((pair) => {
+      assert.strictEqual(Object.getPrototypeOf(pair), Object.prototype);
+    }));
+}
+
 // Test RSA key generation
 {
   async function test(
@@ -277,34 +355,46 @@ const vectors = {
 
     assert.strictEqual(publicKey.type, 'public');
     assert.strictEqual(privateKey.type, 'private');
+    assert.strictEqual(publicKey.toString(), '[object CryptoKey]');
+    assert.strictEqual(privateKey.toString(), '[object CryptoKey]');
     assert.strictEqual(publicKey.extractable, true);
     assert.strictEqual(privateKey.extractable, true);
     assert.deepStrictEqual(publicKey.usages, publicUsages);
     assert.deepStrictEqual(privateKey.usages, privateUsages);
     assert.strictEqual(publicKey.algorithm.name, name);
     assert.strictEqual(publicKey.algorithm.modulusLength, modulusLength);
-    assert.deepStrictEqual(publicKey.algorithm.publicExponent, publicExponent);
+    assert(publicKey.algorithm.publicExponent instanceof Uint8Array);
+    assert.notStrictEqual(publicKey.algorithm.publicExponent, publicExponent);
+    assert(!Buffer.isBuffer(publicKey.algorithm.publicExponent));
+    assert.deepStrictEqual(publicKey.algorithm.publicExponent, new Uint8Array(publicExponent));
     assert.strictEqual(
       KeyObject.from(publicKey).asymmetricKeyDetails.publicExponent,
       bigIntArrayToUnsignedBigInt(publicExponent));
     assert.strictEqual(publicKey.algorithm.hash.name, hash);
     assert.strictEqual(privateKey.algorithm.name, name);
     assert.strictEqual(privateKey.algorithm.modulusLength, modulusLength);
-    assert.deepStrictEqual(privateKey.algorithm.publicExponent, publicExponent);
+    assert(privateKey.algorithm.publicExponent instanceof Uint8Array);
+    assert.notStrictEqual(privateKey.algorithm.publicExponent, publicExponent);
+    assert(!Buffer.isBuffer(privateKey.algorithm.publicExponent));
+    assert.deepStrictEqual(privateKey.algorithm.publicExponent, new Uint8Array(publicExponent));
     assert.strictEqual(
       KeyObject.from(privateKey).asymmetricKeyDetails.publicExponent,
       bigIntArrayToUnsignedBigInt(publicExponent));
     assert.strictEqual(privateKey.algorithm.hash.name, hash);
+    assert.strictEqual(privateKey.algorithm, privateKey.algorithm);
+    assert.strictEqual(privateKey.usages, privateKey.usages);
+    assert.strictEqual(publicKey.algorithm, publicKey.algorithm);
+    assert.strictEqual(publicKey.usages, publicKey.usages);
 
     // Missing parameters
     await assert.rejects(
       subtle.generateKey({ name, publicExponent, hash }, true, usages), {
-        code: 'ERR_INVALID_ARG_TYPE'
+        code: 'ERR_MISSING_OPTION'
       });
 
     await assert.rejects(
       subtle.generateKey({ name, modulusLength, hash }, true, usages), {
-        code: 'ERR_INVALID_ARG_TYPE'
+        code: 'ERR_MISSING_OPTION'
       });
 
     await assert.rejects(
@@ -312,7 +402,7 @@ const vectors = {
         code: 'ERR_MISSING_OPTION'
       });
 
-    await Promise.all(['', true, {}].map((modulusLength) => {
+    await Promise.all([{}].map((modulusLength) => {
       return assert.rejects(subtle.generateKey({
         name,
         modulusLength,
@@ -338,26 +428,21 @@ const vectors = {
           { code: 'ERR_INVALID_ARG_TYPE' });
       }));
 
-    await Promise.all([true, {}, 1, []].map((hash) => {
-      return assert.rejects(subtle.generateKey({
-        name,
-        modulusLength,
-        publicExponent,
-        hash
-      }, true, usages), {
-        message: /Unrecognized name/
+    await assert.rejects(
+      subtle.generateKey(
+        { name, modulusLength, publicExponent: new Uint8Array([1, 1, 1, 1, 1]), hash }, true, usages),
+      {
+        message: 'algorithm.publicExponent must fit in an unsigned 32-bit integer',
+        name: 'OperationError',
       });
-    }));
 
-    await Promise.all(['', {}, 1, []].map((extractable) => {
+    await Promise.all([true, 1].map((hash) => {
       return assert.rejects(subtle.generateKey({
         name,
         modulusLength,
         publicExponent,
         hash
-      }, extractable, usages), {
-        code: 'ERR_INVALID_ARG_TYPE'
-      });
+      }, true, usages), { name: 'NotSupportedError' });
     }));
 
     await Promise.all(['', {}, 1, false].map((usages) => {
@@ -371,46 +456,83 @@ const vectors = {
       });
     }));
 
-    await Promise.all([[1], [1, 0, 0]].map((publicExponent) => {
+    await Promise.all([
+      [[1], 'algorithm.publicExponent must be at least 3'],
+      [[1, 0, 0], 'algorithm.publicExponent must be odd'],
+    ].map(({ 0: publicExponent, 1: message }) => {
       return assert.rejects(subtle.generateKey({
         name,
         modulusLength,
         publicExponent: new Uint8Array(publicExponent),
         hash
       }, true, usages), {
+        message,
         name: 'OperationError',
       });
     }));
+
+    await assert.rejects(subtle.generateKey({
+      name,
+      modulusLength: rsaMinimumModulusLength - 1,
+      publicExponent: new Uint8Array([3]),
+      hash,
+    }, true, usages), {
+      message: `algorithm.modulusLength must be at least ${rsaMinimumModulusLength}`,
+      name: 'OperationError',
+    });
   }
 
   const kTests = [
     [
       'RSASSA-PKCS1-v1_5',
-      1024,
+      getFips() === 1 ? 2048 : 1024,
       Buffer.from([1, 0, 1]),
-      'SHA-256',
+      'SHA-1',
       ['sign'],
       ['verify'],
     ],
     [
       'RSA-PSS',
-      2048,
+      getFips() === 1 ? 2048 : 1024,
       Buffer.from([1, 0, 1]),
-      'SHA-512',
+      'SHA-256',
       ['sign'],
       ['verify'],
     ],
-    [
-      'RSA-OAEP',
-      1024,
-      Buffer.from([3]),
-      'SHA-384',
-      ['decrypt', 'unwrapKey'],
-      ['encrypt', 'wrapKey'],
-    ],
   ];
 
+
+  let fipsExponentTest;
+  if (!isBoringSSL) {
+    if (fips3) {
+      fipsExponentTest = assert.rejects(
+        subtle.generateKey({
+          name: 'RSA-OAEP',
+          modulusLength: 2048,
+          publicExponent: Buffer.from([3]),
+          hash: 'SHA3-256',
+        }, true, ['decrypt', 'unwrapKey', 'encrypt', 'wrapKey']),
+        (err) => err.name === 'OperationError' &&
+                 err.cause?.code === 'ERR_OSSL_RSA_PUB_EXPONENT_OUT_OF_RANGE');
+    } else {
+      kTests.push(
+        [
+          'RSA-OAEP',
+          1024,
+          Buffer.from([3]),
+          'SHA3-256',
+          ['decrypt', 'unwrapKey'],
+          ['encrypt', 'wrapKey'],
+        ],
+      );
+    }
+  } else {
+    common.printSkipMessage('SHA-3 is only supported for digest operations');
+  }
+
   const tests = kTests.map((args) => test(...args));
+  if (fipsExponentTest !== undefined)
+    tests.push(fipsExponentTest);
 
   Promise.all(tests).then(common.mustCall());
 }
@@ -439,6 +561,8 @@ const vectors = {
 
     assert.strictEqual(publicKey.type, 'public');
     assert.strictEqual(privateKey.type, 'private');
+    assert.strictEqual(publicKey.toString(), '[object CryptoKey]');
+    assert.strictEqual(privateKey.toString(), '[object CryptoKey]');
     assert.strictEqual(publicKey.extractable, true);
     assert.strictEqual(privateKey.extractable, true);
     assert.deepStrictEqual(publicKey.usages, publicUsages);
@@ -447,14 +571,23 @@ const vectors = {
     assert.strictEqual(privateKey.algorithm.name, name);
     assert.strictEqual(publicKey.algorithm.namedCurve, namedCurve);
     assert.strictEqual(privateKey.algorithm.namedCurve, namedCurve);
+    assert.strictEqual(privateKey.algorithm, privateKey.algorithm);
+    assert.strictEqual(privateKey.usages, privateKey.usages);
+    assert.strictEqual(publicKey.algorithm, publicKey.algorithm);
+    assert.strictEqual(publicKey.usages, publicKey.usages);
 
     // Invalid parameters
-    [1, true, {}, [], undefined, null].forEach(async (namedCurve) => {
+    [1, true, {}, [], null].forEach(async (namedCurve) => {
       await assert.rejects(
         subtle.generateKey({ name, namedCurve }, true, privateUsages), {
           name: 'NotSupportedError'
         });
     });
+    await assert.rejects(
+      subtle.generateKey({ name, namedCurve: undefined }, true, privateUsages), {
+        name: 'TypeError',
+        code: 'ERR_MISSING_OPTION'
+      });
   }
 
   const kTests = [
@@ -486,8 +619,6 @@ const vectors = {
 
   const tests = kTests.map((args) => test(...args));
 
-  // Test bad parameters
-
   Promise.all(tests).then(common.mustCall());
 }
 
@@ -503,25 +634,27 @@ const vectors = {
     assert(isCryptoKey(key));
 
     assert.strictEqual(key.type, 'secret');
+    assert.strictEqual(key.toString(), '[object CryptoKey]');
     assert.strictEqual(key.extractable, true);
     assert.deepStrictEqual(key.usages, usages);
     assert.strictEqual(key.algorithm.name, name);
     assert.strictEqual(key.algorithm.length, length);
+    assert.strictEqual(key.algorithm, key.algorithm);
+    assert.strictEqual(key.usages, key.usages);
 
     // Invalid parameters
-    [1, 100, 257].forEach(async (length) => {
+    [1, 100, 257, '', false, null].forEach(async (length) => {
       await assert.rejects(
         subtle.generateKey({ name, length }, true, usages), {
           name: 'OperationError'
         });
     });
 
-    ['', {}, [], false, null, undefined].forEach(async (length) => {
-      await assert.rejects(
-        subtle.generateKey({ name, length }, true, usages), {
-          name: 'OperationError',
-        });
-    });
+    await assert.rejects(
+      subtle.generateKey({ name, length: undefined }, true, usages), {
+        name: 'TypeError',
+        code: 'ERR_MISSING_OPTION'
+      });
   }
 
   const kTests = [
@@ -562,35 +695,46 @@ const vectors = {
     assert(isCryptoKey(key));
 
     assert.strictEqual(key.type, 'secret');
+    assert.strictEqual(key.toString(), '[object CryptoKey]');
     assert.strictEqual(key.extractable, true);
     assert.deepStrictEqual(key.usages, usages);
     assert.strictEqual(key.algorithm.name, 'HMAC');
     assert.strictEqual(key.algorithm.length, length);
     assert.strictEqual(key.algorithm.hash.name, hash);
+    assert.strictEqual(key.algorithm, key.algorithm);
+    assert.strictEqual(key.usages, key.usages);
 
-    ['', {}, [], false, null].forEach(async (length) => {
+    [1, false, null].forEach(async (hash) => {
       await assert.rejects(
         subtle.generateKey({ name: 'HMAC', length, hash }, true, usages), {
-          code: 'ERR_INVALID_ARG_TYPE'
-        });
-    });
-
-    [1, {}, [], false, null].forEach(async (hash) => {
-      await assert.rejects(
-        subtle.generateKey({ name: 'HMAC', length, hash }, true, usages), {
-          message: /Unrecognized name/
+          name: 'NotSupportedError',
         });
     });
   }
 
   const kTests = [
-    [ undefined, 'SHA-1', ['sign', 'verify']],
-    [ undefined, 'SHA-256', ['sign', 'verify']],
-    [ undefined, 'SHA-384', ['sign', 'verify']],
-    [ undefined, 'SHA-512', ['sign', 'verify']],
-    [ 128, 'SHA-256', ['sign', 'verify']],
-    [ 1024, 'SHA-512', ['sign', 'verify']],
+    [undefined, 'SHA-1', ['sign', 'verify']],
+    [undefined, 'SHA-256', ['sign', 'verify']],
+    [undefined, 'SHA-384', ['sign', 'verify']],
+    [undefined, 'SHA-512', ['sign', 'verify']],
+    [128, 'SHA-256', ['sign', 'verify']],
+    [1024, 'SHA-512', ['sign', 'verify']],
   ];
+
+  if (!isBoringSSL) {
+    kTests.push(
+      [256, 'SHA3-256', ['sign', 'verify']],
+      [384, 'SHA3-384', ['sign', 'verify']],
+      [512, 'SHA3-512', ['sign', 'verify']],
+      // This interaction is not defined for now.
+      // https://github.com/WICG/webcrypto-modern-algos/issues/23
+      // [undefined, 'SHA3-256', ['sign', 'verify']],
+      // [undefined, 'SHA3-384', ['sign', 'verify']],
+      // [undefined, 'SHA3-512', ['sign', 'verify']],
+    );
+  } else {
+    common.printSkipMessage('SHA-3 is only supported for digest operations');
+  }
 
   const tests = Promise.all(kTests.map((args) => test(...args)));
 
@@ -609,6 +753,12 @@ assert.throws(() => new CryptoKey(), { code: 'ERR_ILLEGAL_CONSTRUCTOR' });
 
 // Test OKP Key Generation
 {
+  async function testFipsUnsupported(name) {
+    await assert.rejects(
+      subtle.generateKey({ name }, true, ['deriveKey', 'deriveBits']),
+      { name: 'NotSupportedError', message: 'Unrecognized algorithm name' });
+  }
+
   async function test(
     name,
     privateUsages,
@@ -629,12 +779,18 @@ assert.throws(() => new CryptoKey(), { code: 'ERR_ILLEGAL_CONSTRUCTOR' });
 
     assert.strictEqual(publicKey.type, 'public');
     assert.strictEqual(privateKey.type, 'private');
+    assert.strictEqual(publicKey.toString(), '[object CryptoKey]');
+    assert.strictEqual(privateKey.toString(), '[object CryptoKey]');
     assert.strictEqual(publicKey.extractable, true);
     assert.strictEqual(privateKey.extractable, true);
     assert.deepStrictEqual(publicKey.usages, publicUsages);
     assert.deepStrictEqual(privateKey.usages, privateUsages);
     assert.strictEqual(publicKey.algorithm.name, name);
     assert.strictEqual(privateKey.algorithm.name, name);
+    assert.strictEqual(privateKey.algorithm, privateKey.algorithm);
+    assert.strictEqual(privateKey.usages, privateKey.usages);
+    assert.strictEqual(publicKey.algorithm, publicKey.algorithm);
+    assert.strictEqual(publicKey.usages, publicKey.usages);
   }
 
   const kTests = [
@@ -644,25 +800,129 @@ assert.throws(() => new CryptoKey(), { code: 'ERR_ILLEGAL_CONSTRUCTOR' });
       ['verify'],
     ],
     [
-      'Ed448',
-      ['sign'],
-      ['verify'],
-    ],
-    [
       'X25519',
-      ['deriveKey', 'deriveBits'],
-      [],
-    ],
-    [
-      'X448',
       ['deriveKey', 'deriveBits'],
       [],
     ],
   ];
 
-  const tests = kTests.map((args) => test(...args));
+  if (!isBoringSSL) {
+    kTests.push(
+      [
+        'Ed448',
+        ['sign'],
+        ['verify'],
+      ],
+      [
+        'X448',
+        ['deriveKey', 'deriveBits'],
+        [],
+      ],
+    );
+  } else {
+    common.printSkipMessage('Skipping unsupported Curve448 test cases');
+  }
 
-  // Test bad parameters
+  const tests = kTests.map((args) => {
+    const [name] = args;
+    if (fips35 && (name === 'X25519' || name === 'X448'))
+      return testFipsUnsupported(name);
+    return test(...args);
+  });
+
+  Promise.all(tests).then(common.mustCall());
+}
+
+// Test ML-DSA Key Generation
+if (hasOpenSSL(3, 5) || isBoringSSL) {
+  async function test(
+    name,
+    privateUsages,
+    publicUsages = privateUsages) {
+
+    let usages = privateUsages;
+    if (publicUsages !== privateUsages)
+      usages = usages.concat(publicUsages);
+
+    const { publicKey, privateKey } = await subtle.generateKey({
+      name,
+    }, true, usages);
+
+    assert(publicKey);
+    assert(privateKey);
+    assert(isCryptoKey(publicKey));
+    assert(isCryptoKey(privateKey));
+
+    assert.strictEqual(publicKey.type, 'public');
+    assert.strictEqual(privateKey.type, 'private');
+    assert.strictEqual(publicKey.toString(), '[object CryptoKey]');
+    assert.strictEqual(privateKey.toString(), '[object CryptoKey]');
+    assert.strictEqual(publicKey.extractable, true);
+    assert.strictEqual(privateKey.extractable, true);
+    assert.deepStrictEqual(publicKey.usages, publicUsages);
+    assert.deepStrictEqual(privateKey.usages, privateUsages);
+    assert.strictEqual(publicKey.algorithm.name, name);
+    assert.strictEqual(privateKey.algorithm.name, name);
+    assert.strictEqual(privateKey.algorithm, privateKey.algorithm);
+    assert.strictEqual(privateKey.usages, privateKey.usages);
+    assert.strictEqual(publicKey.algorithm, publicKey.algorithm);
+    assert.strictEqual(publicKey.usages, publicKey.usages);
+  }
+
+  const kTests = ['ML-DSA-44', 'ML-DSA-65', 'ML-DSA-87'];
+
+  const tests = kTests.map((name) => test(name, ['sign'], ['verify']));
+
+  Promise.all(tests).then(common.mustCall());
+}
+
+// Test ML-KEM Key Generation
+if (hasOpenSSL(3, 5) || isBoringSSL) {
+  async function test(
+    name,
+    privateUsages,
+    publicUsages = privateUsages) {
+
+    let usages = privateUsages;
+    if (publicUsages !== privateUsages)
+      usages = usages.concat(publicUsages);
+
+    const { publicKey, privateKey } = await subtle.generateKey({
+      name,
+    }, true, usages);
+
+    assert(publicKey);
+    assert(privateKey);
+    assert(isCryptoKey(publicKey));
+    assert(isCryptoKey(privateKey));
+
+    assert.strictEqual(publicKey.type, 'public');
+    assert.strictEqual(privateKey.type, 'private');
+    assert.strictEqual(publicKey.toString(), '[object CryptoKey]');
+    assert.strictEqual(privateKey.toString(), '[object CryptoKey]');
+    assert.strictEqual(publicKey.extractable, true);
+    assert.strictEqual(privateKey.extractable, true);
+    assert.deepStrictEqual(publicKey.usages, publicUsages);
+    assert.deepStrictEqual(privateKey.usages, privateUsages);
+    assert.strictEqual(publicKey.algorithm.name, name);
+    assert.strictEqual(privateKey.algorithm.name, name);
+    assert.strictEqual(privateKey.algorithm, privateKey.algorithm);
+    assert.strictEqual(privateKey.usages, privateKey.usages);
+    assert.strictEqual(publicKey.algorithm, publicKey.algorithm);
+    assert.strictEqual(publicKey.usages, publicKey.usages);
+  }
+
+  const kTests = ['ML-KEM-768', 'ML-KEM-1024'];
+
+  if (!isBoringSSL) {
+    kTests.unshift('ML-KEM-512');
+  } else {
+    common.printSkipMessage('Skipping unsupported ML-KEM-512 test');
+  }
+
+  const tests = kTests.map((name) => test(name,
+                                          ['decapsulateKey', 'decapsulateBits'],
+                                          ['encapsulateKey', 'encapsulateBits']));
 
   Promise.all(tests).then(common.mustCall());
 }

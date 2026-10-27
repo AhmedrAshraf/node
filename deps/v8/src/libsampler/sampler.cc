@@ -5,6 +5,7 @@
 #include "src/libsampler/sampler.h"
 
 #include "include/v8-isolate.h"
+#include "include/v8-platform.h"
 #include "include/v8-unwinder.h"
 
 #ifdef USE_SIGNALS
@@ -13,9 +14,12 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sys/time.h>
+
 #include <atomic>
 
-#if !V8_OS_QNX && !V8_OS_AIX
+#include "src/base/platform/memory-protection-key.h"
+
+#if !V8_OS_QNX && !V8_OS_AIX && !V8_OS_ZOS
 #include <sys/syscall.h>
 #endif
 
@@ -36,8 +40,6 @@
 #elif V8_OS_WIN || V8_OS_CYGWIN
 
 #include <windows.h>
-
-#include "src/base/win32-headers.h"
 
 #elif V8_OS_FUCHSIA
 
@@ -67,7 +69,13 @@ using zx_thread_state_general_regs_t = zx_arm64_general_regs_t;
 #include <vector>
 
 #include "src/base/atomic-utils.h"
+#include "src/base/platform/mutex.h"
 #include "src/base/platform/platform.h"
+
+#if V8_OS_ZOS
+// Header from zoslib, for __mcontext_t_:
+#include "edcwccwi.h"
+#endif
 
 #if V8_OS_ANDROID && !defined(__BIONIC_HAVE_UCONTEXT_T)
 
@@ -196,17 +204,20 @@ bool AtomicGuard::is_success() const { return is_success_; }
 
 class Sampler::PlatformData {
  public:
-  PlatformData() : vm_tid_(pthread_self()) {}
-  pthread_t vm_tid() const { return vm_tid_; }
+  PlatformData()
+      : vm_tid_(base::OS::GetCurrentThreadId()), vm_tself_(pthread_self()) {}
+  int vm_tid() const { return vm_tid_; }
+  pthread_t vm_tself() const { return vm_tself_; }
 
  private:
-  pthread_t vm_tid_;
+  int vm_tid_;
+  pthread_t vm_tself_;
 };
 
 void SamplerManager::AddSampler(Sampler* sampler) {
   AtomicGuard atomic_guard(&samplers_access_counter_);
   DCHECK(sampler->IsActive());
-  pthread_t thread_id = sampler->platform_data()->vm_tid();
+  int thread_id = sampler->platform_data()->vm_tid();
   auto it = sampler_map_.find(thread_id);
   if (it == sampler_map_.end()) {
     SamplerList samplers;
@@ -222,12 +233,11 @@ void SamplerManager::AddSampler(Sampler* sampler) {
 void SamplerManager::RemoveSampler(Sampler* sampler) {
   AtomicGuard atomic_guard(&samplers_access_counter_);
   DCHECK(sampler->IsActive());
-  pthread_t thread_id = sampler->platform_data()->vm_tid();
+  int thread_id = sampler->platform_data()->vm_tid();
   auto it = sampler_map_.find(thread_id);
   DCHECK_NE(it, sampler_map_.end());
   SamplerList& samplers = it->second;
-  samplers.erase(std::remove(samplers.begin(), samplers.end(), sampler),
-                 samplers.end());
+  std::erase(samplers, sampler);
   if (samplers.empty()) {
     sampler_map_.erase(it);
   }
@@ -237,7 +247,7 @@ void SamplerManager::DoSample(const v8::RegisterState& state) {
   AtomicGuard atomic_guard(&samplers_access_counter_, false);
   // TODO(petermarshall): Add stat counters for the bailouts here.
   if (!atomic_guard.is_success()) return;
-  pthread_t thread_id = pthread_self();
+  int thread_id = base::OS::GetCurrentThreadId();
   auto it = sampler_map_.find(thread_id);
   if (it == sampler_map_.end()) return;
   SamplerList& samplers = it->second;
@@ -266,13 +276,16 @@ class Sampler::PlatformData {
  public:
   // Get a handle to the calling thread. This is the thread that we are
   // going to profile. We need to make a copy of the handle because we are
-  // going to use it in the sampler thread. Using GetThreadHandle() will
-  // not work in this case. We're using OpenThread because DuplicateHandle
-  // for some reason doesn't work in Chrome's sandbox.
-  PlatformData()
-      : profiled_thread_(OpenThread(THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME |
-                                        THREAD_QUERY_INFORMATION,
-                                    false, GetCurrentThreadId())) {}
+  // going to use it in the sampler thread.
+  PlatformData() {
+    HANDLE current_process = GetCurrentProcess();
+    BOOL result = DuplicateHandle(
+        current_process, GetCurrentThread(), current_process, &profiled_thread_,
+        THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION,
+        FALSE, 0);
+    DCHECK(result);
+    USE(result);
+  }
 
   ~PlatformData() {
     if (profiled_thread_ != nullptr) {
@@ -379,6 +392,11 @@ void SignalHandler::HandleProfilerSignal(int signal, siginfo_t* info,
                                          void* context) {
   USE(info);
   if (signal != SIGPROF) return;
+
+#if V8_HAS_PKU_SUPPORT
+  base::MemoryProtectionKey::SetDefaultPermissionsForAllKeysInSignalHandler();
+#endif
+
   v8::RegisterState state;
   FillRegisterState(context, &state);
   SamplerManager::instance()->DoSample(state);
@@ -387,10 +405,11 @@ void SignalHandler::HandleProfilerSignal(int signal, siginfo_t* info,
 void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
   // Extracting the sample from the context is extremely machine dependent.
   ucontext_t* ucontext = reinterpret_cast<ucontext_t*>(context);
-#if !(V8_OS_OPENBSD || \
-      (V8_OS_LINUX &&  \
-       (V8_HOST_ARCH_PPC || V8_HOST_ARCH_S390 || V8_HOST_ARCH_PPC64)))
+#if !(V8_OS_OPENBSD || V8_OS_ZOS || \
+      (V8_OS_LINUX && (V8_HOST_ARCH_S390X || V8_HOST_ARCH_PPC64)))
   mcontext_t& mcontext = ucontext->uc_mcontext;
+#elif V8_OS_ZOS
+  __mcontext_t_* mcontext = reinterpret_cast<__mcontext_t_*>(context);
 #endif
 #if V8_OS_LINUX
 #if V8_HOST_ARCH_IA32
@@ -430,7 +449,7 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
   state->pc = reinterpret_cast<void*>(mcontext.__pc);
   state->sp = reinterpret_cast<void*>(mcontext.__gregs[3]);
   state->fp = reinterpret_cast<void*>(mcontext.__gregs[22]);
-#elif V8_HOST_ARCH_PPC || V8_HOST_ARCH_PPC64
+#elif V8_HOST_ARCH_PPC64
 #if V8_LIBC_GLIBC
   state->pc = reinterpret_cast<void*>(ucontext->uc_mcontext.regs->nip);
   state->sp = reinterpret_cast<void*>(ucontext->uc_mcontext.regs->gpr[PT_R1]);
@@ -443,15 +462,8 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
   state->fp = reinterpret_cast<void*>(ucontext->uc_mcontext.gp_regs[31]);
   state->lr = reinterpret_cast<void*>(ucontext->uc_mcontext.gp_regs[36]);
 #endif
-#elif V8_HOST_ARCH_S390
-#if V8_TARGET_ARCH_32_BIT
-  // 31-bit target will have bit 0 (MSB) of the PSW set to denote addressing
-  // mode.  This bit needs to be masked out to resolve actual address.
-  state->pc =
-      reinterpret_cast<void*>(ucontext->uc_mcontext.psw.addr & 0x7FFFFFFF);
-#else
+#elif V8_HOST_ARCH_S390X
   state->pc = reinterpret_cast<void*>(ucontext->uc_mcontext.psw.addr);
-#endif  // V8_TARGET_ARCH_32_BIT
   state->sp = reinterpret_cast<void*>(ucontext->uc_mcontext.gregs[15]);
   state->fp = reinterpret_cast<void*>(ucontext->uc_mcontext.gregs[11]);
   state->lr = reinterpret_cast<void*>(ucontext->uc_mcontext.gregs[14]);
@@ -462,6 +474,12 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
   state->fp = reinterpret_cast<void*>(mcontext.__gregs[REG_S0]);
   state->lr = reinterpret_cast<void*>(mcontext.__gregs[REG_RA]);
 #endif  // V8_HOST_ARCH_*
+
+#elif V8_OS_ZOS
+  state->pc = reinterpret_cast<void*>(mcontext->__mc_psw);
+  state->sp = reinterpret_cast<void*>(mcontext->__mc_gr[15]);
+  state->fp = reinterpret_cast<void*>(mcontext->__mc_gr[11]);
+  state->lr = reinterpret_cast<void*>(mcontext->__mc_gr[14]);
 #elif V8_OS_IOS
 
 #if V8_TARGET_ARCH_ARM64
@@ -469,6 +487,7 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
   state->pc = reinterpret_cast<void*>(mcontext->__ss.__pc);
   state->sp = reinterpret_cast<void*>(mcontext->__ss.__sp);
   state->fp = reinterpret_cast<void*>(mcontext->__ss.__fp);
+  state->lr = reinterpret_cast<void*>(mcontext->__ss.__lr);
 #elif V8_TARGET_ARCH_X64
   // Building for the iOS simulator.
   state->pc = reinterpret_cast<void*>(mcontext->__ss.__rip);
@@ -494,6 +513,8 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
       reinterpret_cast<void*>(arm_thread_state64_get_sp(mcontext->__ss));
   state->fp =
       reinterpret_cast<void*>(arm_thread_state64_get_fp(mcontext->__ss));
+  state->lr =
+      reinterpret_cast<void*>(arm_thread_state64_get_lr(mcontext->__ss));
 #endif  // V8_HOST_ARCH_*
 #elif V8_OS_FREEBSD
 #if V8_HOST_ARCH_IA32
@@ -554,7 +575,11 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
 #endif  // USE_SIGNALS
 
 Sampler::Sampler(Isolate* isolate)
-    : isolate_(isolate), data_(std::make_unique<PlatformData>()) {}
+    : isolate_(isolate), data_(std::make_unique<PlatformData>()) {
+  // Abseil's deadlock detection uses locks. If we end up taking a sample absl
+  // internally holds this lock, we can end up deadlocking.
+  SetMutexDeadlockDetectionMode(absl::OnDeadlockCycle::kIgnore);
+}
 
 Sampler::~Sampler() { DCHECK(!IsActive()); }
 
@@ -581,9 +606,8 @@ void Sampler::Stop() {
 void Sampler::DoSample() {
   base::RecursiveMutexGuard lock_guard(SignalHandler::mutex());
   if (!SignalHandler::Installed()) return;
-  DCHECK(IsActive());
   SetShouldRecordSample();
-  pthread_kill(platform_data()->vm_tid(), SIGPROF);
+  pthread_kill(platform_data()->vm_tself(), SIGPROF);
 }
 
 #elif V8_OS_WIN || V8_OS_CYGWIN
@@ -626,7 +650,7 @@ void Sampler::DoSample() {
   if (profiled_thread == ZX_HANDLE_INVALID) return;
 
   zx_handle_t suspend_token = ZX_HANDLE_INVALID;
-  if (zx_task_suspend_token(profiled_thread, &suspend_token) != ZX_OK) return;
+  if (zx_task_suspend(profiled_thread, &suspend_token) != ZX_OK) return;
 
   // Wait for the target thread to become suspended, or to exit.
   // TODO(wez): There is currently no suspension count for threads, so there

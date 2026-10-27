@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2016-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -7,11 +7,13 @@
  * https://www.openssl.org/source/license.html
  */
 
+#if !defined(OSSL_LIBCRYPTO_STORE_STORE_LOCAL_H)
+#define OSSL_LIBCRYPTO_STORE_STORE_LOCAL_H
+
 #include <openssl/core_dispatch.h>
 #include "internal/thread_once.h"
 #include "internal/refcount.h"
 #include <openssl/dsa.h>
-#include <openssl/engine.h>
 #include <openssl/evp.h>
 #include <openssl/lhash.h>
 #include <openssl/x509.h>
@@ -26,18 +28,19 @@
 struct ossl_store_info_st {
     int type;
     union {
-        void *data;              /* used internally as generic pointer */
+        void *data; /* used internally as generic pointer */
 
         struct {
             char *name;
             char *desc;
-        } name;                  /* when type == OSSL_STORE_INFO_NAME */
+        } name; /* when type == OSSL_STORE_INFO_NAME */
 
-        EVP_PKEY *params;        /* when type == OSSL_STORE_INFO_PARAMS */
-        EVP_PKEY *pubkey;        /* when type == OSSL_STORE_INFO_PUBKEY */
-        EVP_PKEY *pkey;          /* when type == OSSL_STORE_INFO_PKEY */
-        X509 *x509;              /* when type == OSSL_STORE_INFO_CERT */
-        X509_CRL *crl;           /* when type == OSSL_STORE_INFO_CRL */
+        EVP_PKEY *params; /* when type == OSSL_STORE_INFO_PARAMS */
+        EVP_PKEY *pubkey; /* when type == OSSL_STORE_INFO_PUBKEY */
+        EVP_PKEY *pkey; /* when type == OSSL_STORE_INFO_PKEY */
+        X509 *x509; /* when type == OSSL_STORE_INFO_CERT */
+        X509_CRL *crl; /* when type == OSSL_STORE_INFO_CRL */
+        EVP_SKEY *skey; /* when type == OSSL_STORE_INFO_SKEY */
     } _;
 };
 DEFINE_STACK_OF(OSSL_STORE_INFO)
@@ -54,7 +57,7 @@ struct ossl_store_search_st {
      * Used by OSSL_STORE_SEARCH_BY_NAME and
      * OSSL_STORE_SEARCH_BY_ISSUER_SERIAL
      */
-    X509_NAME *name;
+    const X509_NAME *name;
 
     /* Used by OSSL_STORE_SEARCH_BY_ISSUER_SERIAL */
     const ASN1_INTEGER *serial;
@@ -83,7 +86,6 @@ struct ossl_store_loader_st {
 #ifndef OPENSSL_NO_DEPRECATED_3_0
     /* Legacy stuff */
     const char *scheme;
-    ENGINE *engine;
     OSSL_STORE_open_fn open;
     OSSL_STORE_attach_fn attach;
     OSSL_STORE_ctrl_fn ctrl;
@@ -102,8 +104,8 @@ struct ossl_store_loader_st {
     const char *propdef;
     const char *description;
 
+    int no_store;
     CRYPTO_REF_COUNT refcnt;
-    CRYPTO_RWLOCK *lock;
 
     OSSL_FUNC_store_open_fn *p_open;
     OSSL_FUNC_store_attach_fn *p_attach;
@@ -113,8 +115,10 @@ struct ossl_store_loader_st {
     OSSL_FUNC_store_eof_fn *p_eof;
     OSSL_FUNC_store_close_fn *p_close;
     OSSL_FUNC_store_export_object_fn *p_export_object;
+    OSSL_FUNC_store_delete_fn *p_delete;
+    OSSL_FUNC_store_open_ex_fn *p_open_ex;
 };
-DEFINE_LHASH_OF(OSSL_STORE_LOADER);
+DEFINE_LHASH_OF_EX(OSSL_STORE_LOADER);
 
 const OSSL_STORE_LOADER *ossl_store_get0_loader_int(const char *scheme);
 void ossl_store_destroy_loaders_int(void);
@@ -166,15 +170,14 @@ int ossl_store_file_detach_pem_bio_int(OSSL_STORE_LOADER_CTX *ctx);
  * -------------------
  */
 OSSL_STORE_LOADER *ossl_store_loader_fetch(OSSL_LIB_CTX *libctx,
-                                           const char *scheme,
-                                           const char *properties);
-OSSL_STORE_LOADER *ossl_store_loader_fetch_by_number(OSSL_LIB_CTX *libctx,
-                                                     int scheme_id,
-                                                     const char *properties);
+    const char *scheme,
+    const char *properties);
 
 /* Standard function to handle the result from OSSL_FUNC_store_load() */
 struct ossl_load_result_data_st {
-    OSSL_STORE_INFO *v;          /* To be filled in */
+    OSSL_STORE_INFO *v; /* To be filled in */
     OSSL_STORE_CTX *ctx;
 };
 OSSL_CALLBACK ossl_store_handle_load_result;
+
+#endif /* !defined(OSSL_LIBCRYPTO_STORE_STORE_LOCAL_H) */

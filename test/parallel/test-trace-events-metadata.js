@@ -3,7 +3,10 @@ const common = require('../common');
 const assert = require('assert');
 const cp = require('child_process');
 const fs = require('fs');
-const path = require('path');
+
+// A perfetto build drops the legacy metadata events, so none of the
+// process_name, version or node entries checked here are recorded.
+common.skipIfPerfettoEnabled();
 
 const CODE =
   'setTimeout(() => { for (let i = 0; i < 100000; i++) { "test" + i } }, 1);' +
@@ -11,7 +14,7 @@ const CODE =
 
 const tmpdir = require('../common/tmpdir');
 tmpdir.refresh();
-const FILE_NAME = path.join(tmpdir.path, 'node_trace.1.log');
+const FILE_NAME = tmpdir.resolve('node_trace.1.log');
 
 const proc = cp.spawn(process.execPath,
                       [ '--trace-event-categories', 'node.perf.usertiming',

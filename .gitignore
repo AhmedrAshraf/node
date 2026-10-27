@@ -11,10 +11,6 @@
 !.clang-format
 !.cpplint
 !.editorconfig
-!.eslintignore
-!.eslintrc.js
-!.eslintrc.yaml
-!.flake8
 !.gitattributes
 !.github
 !.gitignore
@@ -23,6 +19,8 @@
 !.mailmap
 !.nycrc
 !.yamllint.yaml
+!.configurations/
+!/.npmrc
 
 # === Rules for root dir ===
 /core
@@ -31,7 +29,9 @@
 /perf.data
 /perf.data.old
 /tags
+/tags.*
 /doc/api.xml
+/docs/
 /node
 /node_g
 /gon-config.json
@@ -65,12 +65,12 @@ _UpgradeReport_Files/
 /tools/msvs/genfiles/
 /npm.wxs
 /corepack.wxs
-/tools/msvs/msi/Release/
-/tools/msvs/msi/obj/
-/tools/msvs/msi/x64/
+/tools/msvs/msi/**/Release/
+/tools/msvs/msi/**/obj/
+/tools/msvs/msi/**/x64/
 # Exclude MSVS files used for .msi file generation
-!tools/msvs/msi/custom_actions.vcxproj
-!tools/msvs/msi/nodemsi.sln
+!tools/msvs/msi/**/custom_actions.vcxproj
+!tools/msvs/msi/**/nodemsi.sln
 
 # === Rules for GYP artifacts ===
 *-nodegyp*
@@ -103,6 +103,11 @@ _UpgradeReport_Files/
 tools/*/*.i
 tools/*/*.i.tmp
 
+# === Rules for pgo artifacts ===
+*.profdata
+*.profraw
+*.gcda
+
 # === Rules for release artifacts ===
 /*.tar.*
 /*.pkg
@@ -113,12 +118,19 @@ tools/*/*.i.tmp
 /node_modules
 /tools/doc/node_modules
 /tools/clang-format/node_modules
+/tools/eslint/node_modules
+/tools/lint-md/node_modules
+
+# === Rules for tools/perfetto ===
+/tools/perfetto/trace_processor_shell
+/tools/perfetto/trace_processor_shell.exe
 
 # === Rules for test artifacts ===
 /*.tap
 /*.xml
 /v8*-tap.json
 /node_trace.*.log
+/node_trace.*.pftrace
 # coverage related
 /gcovr
 /build
@@ -136,12 +148,16 @@ tools/*/*.i.tmp
 /deps/npm/node_modules/.bin/
 # Respect V8's .gitignore
 !deps/v8/**
-# Ignore the libuv book and GitHub templates
-/deps/uv/.github/
+# Ignore the libuv book
 /deps/uv/docs/code/
 /deps/uv/docs/src/guide/
+# Ignore .github directories
+/deps/**/.github/
 # Ignore dependencies fetched by tools/v8/fetch_deps.py
 /deps/.cipd
+!deps/LIEF/**
+deps/LIEF/*.vcxproj*
+deps/LIEF/*.sln
 
 # === Rules for Windows vcbuild.bat ===
 /temp-vcbuild
@@ -155,6 +171,10 @@ cmake_install.cmake
 install_manifest.txt
 *.cbp
 
+# === Rules for AI assistants ===
+CLAUDE.md
+AGENTS.override.md
+
 # === Global Rules ===
 # Keep last to avoid being excluded
 *.pyc
@@ -164,3 +184,10 @@ __pycache__
 
 # === Rules for C++ development ===
 compile_commands.json
+
+# === Dev Container rules ===
+# Only track the shared base devcontainer.json; ignore everything else under .devcontainer
+!.devcontainer/
+.devcontainer/**
+!.devcontainer/base/
+!.devcontainer/base/devcontainer.json

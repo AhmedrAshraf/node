@@ -1,3 +1,5 @@
+// Flags: --no-deprecation
+
 'use strict';
 const common = require('../common');
 const assert = require('assert');
@@ -67,7 +69,7 @@ process.on('warning', common.mustNotCall());
   d2.run(common.mustCall(() => {
     p.then(d1.bind(common.mustCall((v) => {
       assert.strictEqual(process.domain, d1);
-    })));
+    }))).then(common.mustCall());
   }));
 }
 

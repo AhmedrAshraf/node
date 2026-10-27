@@ -1,6 +1,6 @@
 'use strict';
 
-// Test to validate massive dns lookups do not block filesytem I/O
+// Test to validate massive dns lookups do not block filesystem I/O
 // (or any fast I/O). Prior to https://github.com/libuv/libuv/pull/1845
 // few back-to-back dns lookups were sufficient to engage libuv
 // threadpool workers in a blocking manner, throttling other work items
@@ -46,8 +46,8 @@ function onResolve() {
 
 
 for (let i = 0; i < slowIOmax; i++) {
-  // We need to refresh the domain string everytime,
-  // otherwise the TCP stack that cache the previous lookup
+  // We need to refresh the domain string every time,
+  // otherwise the TCP stack that caches the previous lookup
   // returns result from memory, breaking all our Math.
   dns.lookup(`${randomDomain()}.com`, {}, common.mustCall(onResolve));
 }

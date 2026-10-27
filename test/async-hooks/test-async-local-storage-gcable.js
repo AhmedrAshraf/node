@@ -6,15 +6,19 @@
 
 const common = require('../common');
 const { AsyncLocalStorage } = require('async_hooks');
-const onGC = require('../common/ongc');
+const { onGC } = require('../common/gc');
 
 let asyncLocalStorage = new AsyncLocalStorage();
 
-asyncLocalStorage.run({}, () => {
+asyncLocalStorage.run({}, common.mustCall(() => {
   asyncLocalStorage.disable();
 
   onGC(asyncLocalStorage, { ongc: common.mustCall() });
-});
+}));
+
+// This disable() is needed to remove reference from AsyncContextFrame
+// created during exit of run() to the AsyncLocalStore instance.
+asyncLocalStorage.disable();
 
 asyncLocalStorage = null;
 global.gc();

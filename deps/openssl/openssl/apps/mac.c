@@ -1,5 +1,5 @@
 /*
- * Copyright 2018-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2018-2026 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -7,6 +7,7 @@
  * https://www.openssl.org/source/license.html
  */
 
+#include <stdio.h>
 #include <string.h>
 
 #include "apps.h"
@@ -18,42 +19,46 @@
 #include <openssl/core_names.h>
 
 #undef BUFSIZE
-#define BUFSIZE 1024*8
+#define BUFSIZE 1024 * 8
 
 typedef enum OPTION_choice {
     OPT_COMMON,
-    OPT_MACOPT, OPT_BIN, OPT_IN, OPT_OUT,
-    OPT_CIPHER, OPT_DIGEST,
+    OPT_MACOPT,
+    OPT_BIN,
+    OPT_IN,
+    OPT_OUT,
+    OPT_CIPHER,
+    OPT_DIGEST,
     OPT_PROV_ENUM
 } OPTION_CHOICE;
 
 const OPTIONS mac_options[] = {
-    {OPT_HELP_STR, 1, '-', "Usage: %s [options] mac_name\n"},
+    { OPT_HELP_STR, 1, '-', "Usage: %s [options] mac_name\n" },
 
     OPT_SECTION("General"),
-    {"help", OPT_HELP, '-', "Display this summary"},
-    {"macopt", OPT_MACOPT, 's', "MAC algorithm parameters in n:v form"},
-    {"cipher", OPT_CIPHER, 's', "Cipher"},
-    {"digest", OPT_DIGEST, 's', "Digest"},
-    {OPT_MORE_STR, 1, '-', "See 'PARAMETER NAMES' in the EVP_MAC_ docs"},
+    { "help", OPT_HELP, '-', "Display this summary" },
+    { "macopt", OPT_MACOPT, 's', "MAC algorithm parameters in n:v form" },
+    { "cipher", OPT_CIPHER, 's', "Cipher" },
+    { "digest", OPT_DIGEST, 's', "Digest" },
+    { OPT_MORE_STR, 1, '-', "See 'PARAMETER NAMES' in the EVP_MAC_ docs" },
 
     OPT_SECTION("Input"),
-    {"in", OPT_IN, '<', "Input file to MAC (default is stdin)"},
+    { "in", OPT_IN, '<', "Input file to MAC (default is stdin)" },
 
     OPT_SECTION("Output"),
-    {"out", OPT_OUT, '>', "Output to filename rather than stdout"},
-    {"binary", OPT_BIN, '-',
-        "Output in binary format (default is hexadecimal)"},
+    { "out", OPT_OUT, '>', "Output to filename rather than stdout" },
+    { "binary", OPT_BIN, '-',
+        "Output in binary format (default is hexadecimal)" },
 
     OPT_PROV_OPTIONS,
 
     OPT_PARAMETERS(),
-    {"mac_name", 0, 0, "MAC algorithm"},
-    {NULL}
+    { "mac_name", 0, 0, "MAC algorithm" },
+    { NULL }
 };
 
 static char *alloc_mac_algorithm_name(STACK_OF(OPENSSL_STRING) **optp,
-                                      const char *name, const char *arg)
+    const char *name, const char *arg)
 {
     size_t len = strlen(name) + strlen(arg) + 2;
     char *res;
@@ -64,7 +69,7 @@ static char *alloc_mac_algorithm_name(STACK_OF(OPENSSL_STRING) **optp,
         return NULL;
 
     res = app_malloc(len, "algorithm name");
-    BIO_snprintf(res, len, "%s:%s", name, arg);
+    snprintf(res, len, "%s:%s", name, arg);
     if (sk_OPENSSL_STRING_push(*optp, res))
         return res;
     OPENSSL_free(res);
@@ -89,13 +94,14 @@ int mac_main(int argc, char **argv)
     int inform = FORMAT_BINARY;
     char *digest = NULL, *cipher = NULL;
     OSSL_PARAM *params = NULL;
+    char *new_opt = NULL;
 
     prog = opt_init(argc, argv, mac_options);
     buf = app_malloc(BUFSIZE, "I/O buffer");
     while ((o = opt_next()) != OPT_EOF) {
         switch (o) {
         default:
-opthelp:
+        opthelp:
             BIO_printf(bio_err, "%s: Use -help for summary.\n", prog);
             goto err;
         case OPT_HELP:
@@ -112,10 +118,17 @@ opthelp:
             outfile = opt_arg();
             break;
         case OPT_MACOPT:
+            new_opt = process_additional_mac_key_arguments(opt_arg());
+            if (new_opt == NULL) {
+                ret = 1;
+                goto err;
+            }
             if (opts == NULL)
                 opts = sk_OPENSSL_STRING_new_null();
-            if (opts == NULL || !sk_OPENSSL_STRING_push(opts, opt_arg()))
+            if (opts == NULL || !sk_OPENSSL_STRING_push(opts, new_opt)) {
+                clear_free(new_opt);
                 goto opthelp;
+            }
             break;
         case OPT_CIPHER:
             OPENSSL_free(cipher);
@@ -137,10 +150,9 @@ opthelp:
     }
 
     /* One argument, the MAC name. */
-    argc = opt_num_rest();
-    argv = opt_rest();
-    if (argc != 1)
+    if (!opt_check_rest_arg("MAC name"))
         goto opthelp;
+    argv = opt_rest();
 
     mac = EVP_MAC_fetch(app_get0_libctx(), argv[0], app_get0_propq());
     if (mac == NULL) {
@@ -156,12 +168,12 @@ opthelp:
         int ok = 1;
 
         params = app_params_new_from_opts(opts,
-                                          EVP_MAC_settable_ctx_params(mac));
+            EVP_MAC_settable_ctx_params(mac));
         if (params == NULL)
             goto err;
 
         if (!EVP_MAC_CTX_set_params(ctx, params)) {
-            BIO_printf(bio_err, "MAC parameter error\n");
+            BIO_puts(bio_err, "MAC parameter error\n");
             ERR_print_errors(bio_err);
             ok = 0;
         }
@@ -179,7 +191,7 @@ opthelp:
         goto err;
 
     if (!EVP_MAC_init(ctx, NULL, 0, NULL)) {
-        BIO_printf(bio_err, "EVP_MAC_Init failed\n");
+        BIO_puts(bio_err, "EVP_MAC_Init failed\n");
         goto err;
     }
 
@@ -193,32 +205,32 @@ opthelp:
         if (i == 0)
             break;
         if (!EVP_MAC_update(ctx, buf, i)) {
-            BIO_printf(bio_err, "EVP_MAC_update failed\n");
+            BIO_puts(bio_err, "EVP_MAC_update failed\n");
             goto err;
         }
     }
 
     if (!EVP_MAC_final(ctx, NULL, &len, 0)) {
-        BIO_printf(bio_err, "EVP_MAC_final failed\n");
+        BIO_puts(bio_err, "EVP_MAC_final failed\n");
         goto err;
     }
     if (len > BUFSIZE) {
-        BIO_printf(bio_err, "output len is too large\n");
+        BIO_puts(bio_err, "output len is too large\n");
         goto err;
     }
 
     if (!EVP_MAC_final(ctx, buf, &len, BUFSIZE)) {
-        BIO_printf(bio_err, "EVP_MAC_final failed\n");
+        BIO_puts(bio_err, "EVP_MAC_final failed\n");
         goto err;
     }
 
     if (out_bin) {
-        BIO_write(out, buf, len);
+        BIO_write(out, buf, (int)len);
     } else {
         for (i = 0; i < (int)len; ++i)
             BIO_printf(out, "%02X", buf[i]);
         if (outfile == NULL)
-            BIO_printf(out,"\n");
+            BIO_puts(out, "\n");
     }
 
     ret = 0;
@@ -226,9 +238,7 @@ err:
     if (ret != 0)
         ERR_print_errors(bio_err);
     OPENSSL_clear_free(buf, BUFSIZE);
-    OPENSSL_free(cipher);
-    OPENSSL_free(digest);
-    sk_OPENSSL_STRING_free(opts);
+    sk_OPENSSL_STRING_pop_free(opts, clear_free);
     BIO_free(in);
     BIO_free(out);
     EVP_MAC_CTX_free(ctx);

@@ -1,6 +1,6 @@
 /**
- * @fileoverview Check that common.skipIfEslintMissing is used if
- *               the eslint module is required.
+ * @file Check that common.skipIfEslintMissing is used if
+ *   the eslint module is required.
  */
 'use strict';
 
@@ -22,7 +22,7 @@ module.exports = {
     let hasEslintCheck = false;
 
     function testEslintUsage(context, node) {
-      if (utils.isRequired(node, ['../../tools/node_modules/eslint'])) {
+      if (utils.isRequired(node, ['../../tools/eslint/node_modules/eslint'])) {
         missingCheckNodes.push(node);
       }
 
@@ -47,10 +47,10 @@ module.exports = {
               if (commonModuleNode) {
                 return fixer.insertTextAfter(
                   commonModuleNode,
-                  '\ncommon.skipIfEslintMissing();'
+                  '\ncommon.skipIfEslintMissing();',
                 );
               }
-            }
+            },
           });
         });
       }
@@ -59,7 +59,7 @@ module.exports = {
     return {
       'CallExpression': (node) => testEslintUsage(context, node),
       'MemberExpression': (node) => checkMemberExpression(context, node),
-      'Program:exit': () => reportIfMissing(context)
+      'Program:exit': () => reportIfMissing(context),
     };
-  }
+  },
 };

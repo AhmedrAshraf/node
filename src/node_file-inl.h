@@ -6,6 +6,8 @@
 #include "node_file.h"
 #include "req_wrap-inl.h"
 
+#include <algorithm>
+
 namespace node {
 namespace fs {
 
@@ -25,6 +27,15 @@ void FSContinuationData::MaybeSetFirstPath(const std::string& path) {
   if (first_path_.empty()) {
     first_path_ = path;
   }
+}
+
+bool FSContinuationData::ShouldRetryENOENT(const std::string& path) {
+  if (std::find(enoent_paths_.begin(), enoent_paths_.end(), path) !=
+      enoent_paths_.end()) {
+    return false;
+  }
+  enoent_paths_.push_back(path);
+  return true;
 }
 
 std::string FSContinuationData::PopPath() {
@@ -144,6 +155,39 @@ v8::Local<v8::Value> FillGlobalStatsArray(BindingData* binding_data,
   }
 }
 
+template <typename NativeT, typename V8T>
+void FillStatFsArray(AliasedBufferBase<NativeT, V8T>* fields,
+                     const uv_statfs_t* s) {
+#define SET_FIELD(field, stat)                                                 \
+  fields->SetValue(static_cast<size_t>(FsStatFsOffset::field),                 \
+                   static_cast<NativeT>(stat))
+
+  SET_FIELD(kType, s->f_type);
+  SET_FIELD(kBSize, s->f_bsize);
+  SET_FIELD(kFrSize, s->f_frsize);
+  SET_FIELD(kBlocks, s->f_blocks);
+  SET_FIELD(kBFree, s->f_bfree);
+  SET_FIELD(kBAvail, s->f_bavail);
+  SET_FIELD(kFiles, s->f_files);
+  SET_FIELD(kFFree, s->f_ffree);
+
+#undef SET_FIELD
+}
+
+v8::Local<v8::Value> FillGlobalStatFsArray(BindingData* binding_data,
+                                           const bool use_bigint,
+                                           const uv_statfs_t* s) {
+  if (use_bigint) {
+    auto* const arr = &binding_data->statfs_field_bigint_array;
+    FillStatFsArray(arr, s);
+    return arr->GetJSArray();
+  } else {
+    auto* const arr = &binding_data->statfs_field_array;
+    FillStatFsArray(arr, s);
+    return arr->GetJSArray();
+  }
+}
+
 template <typename AliasedBufferT>
 FSReqPromise<AliasedBufferT>*
 FSReqPromise<AliasedBufferT>::New(BindingData* binding_data,
@@ -172,26 +216,26 @@ FSReqPromise<AliasedBufferT>::~FSReqPromise() {
 }
 
 template <typename AliasedBufferT>
-FSReqPromise<AliasedBufferT>::FSReqPromise(
-    BindingData* binding_data,
-    v8::Local<v8::Object> obj,
-    bool use_bigint)
-  : FSReqBase(binding_data,
-              obj,
-              AsyncWrap::PROVIDER_FSREQPROMISE,
-              use_bigint),
-    stats_field_array_(
-        env()->isolate(),
-        static_cast<size_t>(FsStatsOffset::kFsStatsFieldsNumber)) {}
+FSReqPromise<AliasedBufferT>::FSReqPromise(BindingData* binding_data,
+                                           v8::Local<v8::Object> obj,
+                                           bool use_bigint)
+    : FSReqBase(
+          binding_data, obj, AsyncWrap::PROVIDER_FSREQPROMISE, use_bigint) {}
 
 template <typename AliasedBufferT>
 void FSReqPromise<AliasedBufferT>::Reject(v8::Local<v8::Value> reject) {
   finished_ = true;
   v8::HandleScope scope(env()->isolate());
   InternalCallbackScope callback_scope(this);
-  v8::Local<v8::Value> value =
-      object()->Get(env()->context(),
-                    env()->promise_string()).ToLocalChecked();
+  v8::Local<v8::Value> value;
+  if (!object()
+           ->Get(env()->context(), env()->promise_string())
+           .ToLocal(&value)) {
+    // If we hit this, getting the value from the object failed and
+    // an error was likely scheduled. We could try to reject the promise
+    // but let's just allow the error to propagate.
+    return;
+  }
   v8::Local<v8::Promise::Resolver> resolver = value.As<v8::Promise::Resolver>();
   USE(resolver->Reject(env()->context(), reject).FromJust());
 }
@@ -201,25 +245,49 @@ void FSReqPromise<AliasedBufferT>::Resolve(v8::Local<v8::Value> value) {
   finished_ = true;
   v8::HandleScope scope(env()->isolate());
   InternalCallbackScope callback_scope(this);
-  v8::Local<v8::Value> val =
-      object()->Get(env()->context(),
-                    env()->promise_string()).ToLocalChecked();
+  v8::Local<v8::Value> val;
+  if (!object()->Get(env()->context(), env()->promise_string()).ToLocal(&val)) {
+    // If we hit this, getting the value from the object failed and
+    // an error was likely scheduled. We could try to reject the promise
+    // but let's just allow the error to propagate.
+    return;
+  }
   v8::Local<v8::Promise::Resolver> resolver = val.As<v8::Promise::Resolver>();
   USE(resolver->Resolve(env()->context(), value).FromJust());
 }
 
 template <typename AliasedBufferT>
 void FSReqPromise<AliasedBufferT>::ResolveStat(const uv_stat_t* stat) {
-  FillStatsArray(&stats_field_array_, stat);
-  Resolve(stats_field_array_.GetJSArray());
+  if (!stats_field_array_.has_value()) {
+    stats_field_array_.emplace(
+        env()->isolate(),
+        static_cast<size_t>(FsStatsOffset::kFsStatsFieldsNumber));
+  }
+  FillStatsArray(&stats_field_array_.value(), stat);
+  Resolve(stats_field_array_->GetJSArray());
+}
+
+template <typename AliasedBufferT>
+void FSReqPromise<AliasedBufferT>::ResolveStatFs(const uv_statfs_t* stat) {
+  if (!statfs_field_array_.has_value()) {
+    statfs_field_array_.emplace(
+        env()->isolate(),
+        static_cast<size_t>(FsStatFsOffset::kFsStatFsFieldsNumber));
+  }
+  FillStatFsArray(&statfs_field_array_.value(), stat);
+  Resolve(statfs_field_array_->GetJSArray());
 }
 
 template <typename AliasedBufferT>
 void FSReqPromise<AliasedBufferT>::SetReturnValue(
     const v8::FunctionCallbackInfo<v8::Value>& args) {
-  v8::Local<v8::Value> val =
-      object()->Get(env()->context(),
-                    env()->promise_string()).ToLocalChecked();
+  v8::Local<v8::Value> val;
+  if (!object()->Get(env()->context(), env()->promise_string()).ToLocal(&val)) {
+    // If we hit this, getting the value from the object failed and
+    // an error was likely scheduled. We could try to reject the promise
+    // but let's just allow the error to propagate.
+    return;
+  }
   v8::Local<v8::Promise::Resolver> resolver = val.As<v8::Promise::Resolver>();
   args.GetReturnValue().Set(resolver->GetPromise());
 }
@@ -227,27 +295,39 @@ void FSReqPromise<AliasedBufferT>::SetReturnValue(
 template <typename AliasedBufferT>
 void FSReqPromise<AliasedBufferT>::MemoryInfo(MemoryTracker* tracker) const {
   FSReqBase::MemoryInfo(tracker);
-  tracker->TrackField("stats_field_array", stats_field_array_);
+  if (stats_field_array_.has_value()) {
+    tracker->TrackField("stats_field_array", stats_field_array_.value());
+  }
+  if (statfs_field_array_.has_value()) {
+    tracker->TrackField("statfs_field_array", statfs_field_array_.value());
+  }
 }
 
 FSReqBase* GetReqWrap(const v8::FunctionCallbackInfo<v8::Value>& args,
                       int index,
                       bool use_bigint) {
   v8::Local<v8::Value> value = args[index];
+  FSReqBase* result = nullptr;
   if (value->IsObject()) {
-    return Unwrap<FSReqBase>(value.As<v8::Object>());
-  }
+    result = BaseObject::Unwrap<FSReqBase>(value.As<v8::Object>());
+  } else {
+    Realm* realm = Realm::GetCurrent(args);
+    BindingData* binding_data = realm->GetBindingData<BindingData>();
 
-  BindingData* binding_data = Environment::GetBindingData<BindingData>(args);
-  Environment* env = binding_data->env();
-  if (value->StrictEquals(env->fs_use_promises_symbol())) {
-    if (use_bigint) {
-      return FSReqPromise<AliasedBigInt64Array>::New(binding_data, use_bigint);
-    } else {
-      return FSReqPromise<AliasedFloat64Array>::New(binding_data, use_bigint);
+    if (value->StrictEquals(realm->isolate_data()->fs_use_promises_symbol())) {
+      if (use_bigint) {
+        result =
+            FSReqPromise<AliasedBigInt64Array>::New(binding_data, use_bigint);
+      } else {
+        result =
+            FSReqPromise<AliasedFloat64Array>::New(binding_data, use_bigint);
+      }
     }
   }
-  return nullptr;
+  if (result != nullptr) {
+    result->SetReturnValue(args);
+  }
+  return result;
 }
 
 // Returns nullptr if the operation fails from the start.
@@ -266,10 +346,7 @@ FSReqBase* AsyncDestCall(Environment* env, FSReqBase* req_wrap,
     uv_req->path = nullptr;
     after(uv_req);  // after may delete req_wrap if there is an error
     req_wrap = nullptr;
-  } else {
-    req_wrap->SetReturnValue(args);
   }
-
   return req_wrap;
 }
 
@@ -290,23 +367,125 @@ FSReqBase* AsyncCall(Environment* env,
 // creating an error in the C++ land.
 // ctx must be checked using value->IsObject() before being passed.
 template <typename Func, typename... Args>
-int SyncCall(Environment* env, v8::Local<v8::Value> ctx,
-             FSReqWrapSync* req_wrap, const char* syscall,
-             Func fn, Args... args) {
+v8::Maybe<int> SyncCall(Environment* env,
+                        v8::Local<v8::Value> ctx,
+                        FSReqWrapSync* req_wrap,
+                        const char* syscall,
+                        Func fn,
+                        Args... args) {
   env->PrintSyncTrace();
   int err = fn(env->event_loop(), &(req_wrap->req), args..., nullptr);
   if (err < 0) {
     v8::Local<v8::Context> context = env->context();
     v8::Local<v8::Object> ctx_obj = ctx.As<v8::Object>();
     v8::Isolate* isolate = env->isolate();
-    ctx_obj->Set(context,
-                 env->errno_string(),
-                 v8::Integer::New(isolate, err)).Check();
-    ctx_obj->Set(context,
-                 env->syscall_string(),
-                 OneByteString(isolate, syscall)).Check();
+    if (ctx_obj
+            ->Set(context, env->errno_string(), v8::Integer::New(isolate, err))
+            .IsNothing() ||
+        ctx_obj
+            ->Set(
+                context, env->syscall_string(), OneByteString(isolate, syscall))
+            .IsNothing()) {
+      return v8::Nothing<int>();
+    }
   }
-  return err;
+  return v8::Just(err);
+}
+
+// Similar to SyncCall but throws immediately if there is an error.
+template <typename Predicate, typename Func, typename... Args>
+int SyncCallAndThrowIf(Predicate should_throw,
+                       Environment* env,
+                       FSReqWrapSync* req_wrap,
+                       Func fn,
+                       Args... args) {
+  env->PrintSyncTrace();
+  int result = fn(nullptr, &(req_wrap->req), args..., nullptr);
+  if (should_throw(result)) {
+    env->ThrowUVException(result,
+                          req_wrap->syscall_p,
+                          nullptr,
+                          req_wrap->path_p,
+                          req_wrap->dest_p);
+  }
+  return result;
+}
+
+constexpr bool is_uv_error(int result) {
+  return result < 0;
+}
+
+// Similar to SyncCall but throws immediately if there is an error.
+template <typename Func, typename... Args>
+int SyncCallAndThrowOnError(Environment* env,
+                            FSReqWrapSync* req_wrap,
+                            Func fn,
+                            Args... args) {
+  return SyncCallAndThrowIf(is_uv_error, env, req_wrap, fn, args...);
+}
+
+// Closes a file created by mkstemp() whose descriptor cannot be handed to JS.
+inline void CloseMkstempFd(int fd) {
+  uv_fs_t close_req;
+  uv_fs_close(nullptr, &close_req, fd, nullptr);
+  uv_fs_req_cleanup(&close_req);
+}
+
+// The descriptor is handed to JS as a number, like the one of fs.open().
+inline v8::MaybeLocal<v8::Value> MkstempFd(Environment* env, int fd) {
+  env->AddUnmanagedFd(fd);
+  return v8::Integer::New(env->isolate(), fd);
+}
+
+// The descriptor is owned by the FileHandle that `new_handle` creates.
+template <typename NewHandle>
+v8::MaybeLocal<v8::Value> MkstempFileHandle(NewHandle&& new_handle) {
+  FileHandle* handle = new_handle();
+  if (handle == nullptr) return {};
+  return handle->object();
+}
+
+// Builds the [path, file] result for a file created by mkstemp(). `make_file`
+// takes ownership of the descriptor. If a step fails, the file is closed and
+// the exception is left pending.
+template <typename EncodePath, typename MakeFile>
+v8::MaybeLocal<v8::Value> MkstempResult(v8::Isolate* isolate,
+                                        int fd,
+                                        EncodePath&& encode_path,
+                                        MakeFile&& make_file) {
+  v8::Local<v8::Value> path;
+  v8::Local<v8::Value> file;
+  if (!encode_path().ToLocal(&path) || !make_file().ToLocal(&file)) {
+    CloseMkstempFd(fd);
+    return {};
+  }
+  v8::Local<v8::Value> result[] = {path, file};
+  return v8::Array::New(isolate, result, arraysize(result));
+}
+
+// Resolves `req_wrap` with the result of mkstemp(), or rejects it with the
+// exception thrown while building it. The TryCatch is left before calling
+// into JS.
+template <typename EncodePath, typename MakeFile>
+void ResolveMkstemp(FSReqBase* req_wrap,
+                    int fd,
+                    EncodePath&& encode_path,
+                    MakeFile&& make_file) {
+  v8::Isolate* isolate = req_wrap->env()->isolate();
+  v8::Local<v8::Value> result;
+  v8::Local<v8::Value> error;
+  {
+    v8::TryCatch try_catch(isolate);
+    if (!MkstempResult(isolate, fd, encode_path, make_file).ToLocal(&result)) {
+      CHECK(try_catch.CanContinue());
+      error = try_catch.Exception();
+    }
+  }
+  if (error.IsEmpty()) {
+    req_wrap->Resolve(result);
+  } else {
+    req_wrap->Reject(error);
+  }
 }
 
 }  // namespace fs

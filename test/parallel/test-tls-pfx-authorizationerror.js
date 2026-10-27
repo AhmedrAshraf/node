@@ -10,14 +10,38 @@ const fixtures = require('../common/fixtures');
 
 const assert = require('assert');
 const tls = require('tls');
+const { hasFIPS } = require('../common/crypto');
 
-const pfx = fixtures.readKey('agent1.pfx');
+const fips3 = hasFIPS(3);
+const fips35 = hasFIPS(3, 5);
+const fips4 = hasFIPS(4);
+const pfx = fixtures.readKey(fips35 ? 'agent1-fips.pfx' : 'agent1.pfx');
+const passphrase = fips35 ? 'password' : 'sample';
+
+if (fips3) {
+  assert.throws(() => tls.createServer({
+    pfx: fixtures.readKey('agent1.pfx'),
+    passphrase: 'sample',
+  }), {
+    code: 'ERR_CRYPTO_UNSUPPORTED_OPERATION',
+  });
+
+  if (!fips35) {
+    return;
+  }
+
+  if (fips4) {
+    assert.throws(() => tls.createServer({ pfx, passphrase: 'sample' }), {
+      message: 'password strength too weak',
+    });
+  }
+}
 
 const server = tls
   .createServer(
     {
       pfx: pfx,
-      passphrase: 'sample',
+      passphrase,
       requestCert: true,
       rejectUnauthorized: false
     },
@@ -28,15 +52,15 @@ const server = tls
       c.end();
     })
   )
-  .listen(0, function() {
+  .listen(0, common.mustCall(function() {
     const client = tls.connect(
       {
         port: this.address().port,
         pfx: pfx,
-        passphrase: 'sample',
+        passphrase,
         rejectUnauthorized: false
       },
-      function() {
+      common.mustCall(() => {
         for (let i = 0; i < 10; ++i) {
           // Calling this repeatedly is a regression test that verifies
           // that .getCertificate() does not accidentally decrease the
@@ -46,6 +70,6 @@ const server = tls
         }
         client.end();
         server.close();
-      }
+      }),
     );
-  });
+  }));

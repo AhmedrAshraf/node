@@ -3,6 +3,10 @@
 const child_process = require('child_process');
 const http_benchmarkers = require('./_http-benchmarkers.js');
 
+function allow() {
+  return true;
+}
+
 class Benchmark {
   constructor(fn, configs, options = {}) {
     // Used to make sure a benchmark only start a timer once
@@ -18,27 +22,45 @@ class Benchmark {
     this.name = require.main.filename.slice(__dirname.length + 1);
 
     // Execution arguments i.e. flags used to run the jobs
-    this.flags = process.env.NODE_BENCHMARK_FLAGS ?
-      process.env.NODE_BENCHMARK_FLAGS.split(/\s+/) :
-      [];
+    this.flags = process.env.NODE_BENCHMARK_FLAGS?.split(/\s+/) ?? [];
 
     // Parse job-specific configuration from the command line arguments
     const argv = process.argv.slice(2);
     const parsed_args = this._parseArgs(argv, configs, options);
+
+    this.originalOptions = options;
     this.options = parsed_args.cli;
     this.extra_options = parsed_args.extra;
+    this.combinationFilter = typeof options.combinationFilter === 'function' ? options.combinationFilter : allow;
+
+    if (options.byGroups) {
+      this.queue = [];
+      const groupNames = process.env.NODE_RUN_BENCHMARK_GROUPS?.split(',') ?? Object.keys(configs);
+
+      for (const groupName of groupNames) {
+        const config = { ...configs[groupName][0], group: groupName };
+        const parsed_args = this._parseArgs(argv, config, options);
+
+        this.options = parsed_args.cli;
+        this.extra_options = parsed_args.extra;
+        this.queue = this.queue.concat(this._queue(this.options));
+      }
+    } else {
+      this.queue = this._queue(this.options);
+    }
+
     if (options.flags) {
       this.flags = this.flags.concat(options.flags);
     }
 
-    // The configuration list as a queue of jobs
-    this.queue = this._queue(this.options);
+    if (this.queue.length === 0)
+      return;
 
     // The configuration of the current job, head of the queue
     this.config = this.queue[0];
 
     process.nextTick(() => {
-      if (Object.hasOwn(process.env, 'NODE_RUN_BENCHMARK_FN')) {
+      if (process.env.NODE_RUN_BENCHMARK_FN !== undefined) {
         fn(this.config);
       } else {
         // _run will use fork() to create a new process for each configuration
@@ -60,6 +82,9 @@ class Benchmark {
         if (typeof value === 'number') {
           if (key === 'dur' || key === 'duration') {
             value = 0.05;
+          } else if (key === 'memory') {
+            // minimum Argon2 memcost with 1 lane is 8
+            value = 8;
           } else if (value > 1) {
             value = 1;
           }
@@ -91,13 +116,11 @@ class Benchmark {
         process.exit(1);
       }
       const [, key, value] = match;
-      if (Object.hasOwn(configs, key)) {
-        if (!cliOptions[key])
-          cliOptions[key] = [];
-        cliOptions[key].push(
-          // Infer the type from the config object and parse accordingly
-          typeof configs[key][0] === 'number' ? +value : value
-        );
+      if (configs[key] !== undefined) {
+        cliOptions[key] ||= [];
+        const configType = typeof configs[key][0];
+        const configValue = configType === 'number' ? +value : configType === 'boolean' ? value === 'true' : value;
+        cliOptions[key].push(configValue);
       } else {
         extraOptions[key] = value;
       }
@@ -108,6 +131,7 @@ class Benchmark {
   _queue(options) {
     const queue = [];
     const keys = Object.keys(options);
+    const { combinationFilter } = this;
 
     // Perform a depth-first walk through all options to generate a
     // configuration list that contains all combinations.
@@ -116,7 +140,7 @@ class Benchmark {
       const values = options[key];
 
       for (const value of values) {
-        if (typeof value !== 'number' && typeof value !== 'string') {
+        if (typeof value !== 'number' && typeof value !== 'string' && typeof value !== 'boolean') {
           throw new TypeError(
             `configuration "${key}" had type ${typeof value}`);
         }
@@ -131,7 +155,15 @@ class Benchmark {
         if (keyIndex + 1 < keys.length) {
           recursive(keyIndex + 1, currConfig);
         } else {
-          queue.push(currConfig);
+          // Check if we should allow the current combination
+          const allowed = combinationFilter({ ...currConfig });
+          if (typeof allowed !== 'boolean') {
+            throw new TypeError(
+              'Combination filter must always return a boolean',
+            );
+          }
+          if (allowed)
+            queue.push(currConfig);
         }
       }
     }
@@ -147,10 +179,9 @@ class Benchmark {
 
   http(options, cb) {
     const http_options = { ...options };
-    http_options.benchmarker = http_options.benchmarker ||
-                               this.config.benchmarker ||
-                               this.extra_options.benchmarker ||
-                               http_benchmarkers.default_http_benchmarker;
+    http_options.benchmarker ||= this.config.benchmarker ||
+                                 this.extra_options.benchmarker ||
+                                 http_benchmarkers.default_http_benchmarker;
     http_benchmarkers.run(
       http_options, (error, code, used_benchmarker, result, elapsed) => {
         if (cb) {
@@ -162,11 +193,26 @@ class Benchmark {
         }
         this.config.benchmarker = used_benchmarker;
         this.report(result, elapsed);
-      }
+      },
     );
   }
 
   _run() {
+    // A forked child is told to run the benchmark function directly, rather
+    // than build its own queue and fork again, through the
+    // NODE_RUN_BENCHMARK_FN environment variable. A child always inherits
+    // this.flags in its execArgv, so reaching _run() with those flags already
+    // applied means the variable did not survive to the child and every
+    // generation would keep forking. Fail loudly instead of forking forever.
+    if (process.send &&
+        this.flags.length > 0 &&
+        this.flags.every((flag) => process.execArgv.includes(flag))) {
+      throw new Error(
+        'Benchmark child process was started with the benchmark flags but ' +
+        'without NODE_RUN_BENCHMARK_FN, refusing to fork again. Something ' +
+        'removed the variable from the child environment.');
+    }
+
     // If forked, report to the parent.
     if (process.send) {
       process.send({
@@ -174,6 +220,26 @@ class Benchmark {
         name: this.name,
         queueLength: this.queue.length,
       });
+    }
+
+    if (this.originalOptions.setup) {
+      // Only do this from the root process. _run() is only ever called from the root,
+      // in child processes main is run directly.
+      this.originalOptions.setup(this.queue);
+    }
+
+    // Enforcing the permission model removes the environment variables
+    // --allow-env does not grant access to at startup, which would drop the
+    // NODE_RUN_BENCHMARK_FN set below. The child only ever sees the
+    // environment this process hands it, so granting access to all of it does
+    // not widen what the benchmark can reach. Audit mode removes nothing, so
+    // it is left alone to keep its diagnostics intact.
+    const childExecArgv = this.flags.concat(process.execArgv);
+    const enforcesPermission = (arg) =>
+      arg === '--permission' || arg.startsWith('--permission=');
+    if (childExecArgv.some(enforcesPermission) &&
+        !childExecArgv.some((arg) => arg.startsWith('--allow-env'))) {
+      childExecArgv.push('--allow-env=*');
     }
 
     const recursive = (queueIndex) => {
@@ -196,7 +262,7 @@ class Benchmark {
 
       const child = child_process.fork(require.main.filename, childArgs, {
         env: childEnv,
-        execArgv: this.flags.concat(process.execArgv),
+        execArgv: childExecArgv,
       });
       child.on('message', sendResult);
       child.on('close', (code) => {
@@ -290,10 +356,10 @@ function sendResult(data) {
   if (process.send) {
     // If forked, report by process send
     process.send(data, () => {
-      if (Object.hasOwn(process.env, 'NODE_RUN_BENCHMARK_FN')) {
+      if (process.env.NODE_RUN_BENCHMARK_FN !== undefined) {
         // If, for any reason, the process is unable to self close within
         // a second after completing, forcefully close it.
-        setTimeout(() => {
+        require('timers').setTimeout(() => {
           process.exit(0);
         }, 5000).unref();
       }
@@ -339,8 +405,9 @@ function getUrlData(withBase) {
   for (const item of data) {
     if (item.failure || !item.input) continue;
     if (withBase) {
-      result.push([item.input, item.base]);
-    } else if (item.base !== 'about:blank') {
+      // item.base might be null. It should be converted into `undefined`.
+      result.push([item.input, item.base ?? undefined]);
+    } else if (item.base !== null) {
       result.push(item.base);
     }
   }
@@ -353,12 +420,11 @@ function getUrlData(withBase) {
  * The 'wpt' type contains about 400 data points when `withBase` is true,
  * and 200 data points when `withBase` is false.
  * Other types contain 200 data points with or without base.
- *
  * @param {string} type Type of the data, 'wpt' or a key of `urls`
  * @param {number} e The repetition of the data, as exponent of 2
  * @param {boolean} withBase Whether to include a base URL
  * @param {boolean} asUrl Whether to return the results as URL objects
- * @return {string[] | string[][] | URL[]}
+ * @returns {string[] | string[][] | URL[]}
  */
 function bakeUrlData(type, e = 0, withBase = false, asUrl = false) {
   let result = [];
@@ -404,7 +470,11 @@ module.exports = {
       return process.binding(bindingName);
     }
   },
-  buildType: process.features.debug ? 'Debug' : 'Release',
+  // As in test/common: a --debug-node build is still a Release build, and its
+  // addons are in build/Release.
+  buildType: process.config.target_defaults ?
+    process.config.target_defaults.default_configuration :
+    'Release',
   createBenchmark(fn, configs, options) {
     return new Benchmark(fn, configs, options);
   },

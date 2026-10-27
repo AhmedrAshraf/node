@@ -24,6 +24,7 @@
 #include "node_internals.h"
 #include "util-inl.h"
 
+#include "v8-local-handle.h"
 #include "zlib.h"
 
 #if !defined(_MSC_VER)
@@ -37,10 +38,54 @@
 
 #if HAVE_OPENSSL
 #include <openssl/ec.h>
+#include <openssl/rsa.h>
 #include <openssl/ssl.h>
-#ifndef OPENSSL_NO_ENGINE
-#include <openssl/engine.h>
-#endif  // !OPENSSL_NO_ENGINE
+#if !defined(RSA_PKCS1_PADDING)
+#define RSA_PKCS1_PADDING 1
+#endif
+#if !defined(RSA_SSLV23_PADDING)
+#define RSA_SSLV23_PADDING 2
+#endif
+#if !defined(RSA_NO_PADDING)
+#define RSA_NO_PADDING 3
+#endif
+#if !defined(RSA_PKCS1_OAEP_PADDING)
+#define RSA_PKCS1_OAEP_PADDING 4
+#endif
+#if !defined(RSA_X931_PADDING)
+#define RSA_X931_PADDING 5
+#endif
+#if !defined(RSA_PKCS1_PSS_PADDING)
+#define RSA_PKCS1_PSS_PADDING 6
+#endif
+#ifndef RSA_PSS_SALTLEN_DIGEST
+#define RSA_PSS_SALTLEN_DIGEST -1
+#endif
+
+#ifndef RSA_PSS_SALTLEN_MAX_SIGN
+#define RSA_PSS_SALTLEN_MAX_SIGN -2
+#endif
+
+#ifndef RSA_PSS_SALTLEN_AUTO
+#define RSA_PSS_SALTLEN_AUTO -2
+#endif
+
+#ifndef OPENSSL_IS_BORINGSSL
+// OpenSSL hides these deprecated DH check constants under
+// OPENSSL_NO_DEPRECATED, but the numeric verifyError values remain public API.
+#if !defined(DH_CHECK_P_NOT_PRIME)
+#define DH_CHECK_P_NOT_PRIME 0x01
+#endif
+#if !defined(DH_CHECK_P_NOT_SAFE_PRIME)
+#define DH_CHECK_P_NOT_SAFE_PRIME 0x02
+#endif
+#if !defined(DH_UNABLE_TO_CHECK_GENERATOR)
+#define DH_UNABLE_TO_CHECK_GENERATOR 0x04
+#endif
+#if !defined(DH_NOT_SUITABLE_GENERATOR)
+#define DH_NOT_SUITABLE_GENERATOR 0x08
+#endif
+#endif
 #endif  // HAVE_OPENSSL
 
 #if defined(__POSIX__)
@@ -63,10 +108,14 @@
 
 namespace node {
 
+using v8::Context;
+using v8::Isolate;
 using v8::Local;
+using v8::Null;
 using v8::Object;
+using v8::Value;
 
-namespace {
+namespace constants {
 
 void DefineErrnoConstants(Local<Object> target) {
 #ifdef E2BIG
@@ -844,40 +893,8 @@ void DefineCryptoConstants(Local<Object> target) {
     NODE_DEFINE_CONSTANT(target, SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS);
 #endif
 
-#ifdef SSL_OP_EPHEMERAL_RSA
-    NODE_DEFINE_CONSTANT(target, SSL_OP_EPHEMERAL_RSA);
-#endif
-
 #ifdef SSL_OP_LEGACY_SERVER_CONNECT
     NODE_DEFINE_CONSTANT(target, SSL_OP_LEGACY_SERVER_CONNECT);
-#endif
-
-#ifdef SSL_OP_MICROSOFT_BIG_SSLV3_BUFFER
-    NODE_DEFINE_CONSTANT(target, SSL_OP_MICROSOFT_BIG_SSLV3_BUFFER);
-#endif
-
-#ifdef SSL_OP_MICROSOFT_SESS_ID_BUG
-    NODE_DEFINE_CONSTANT(target, SSL_OP_MICROSOFT_SESS_ID_BUG);
-#endif
-
-#ifdef SSL_OP_MSIE_SSLV2_RSA_PADDING
-    NODE_DEFINE_CONSTANT(target, SSL_OP_MSIE_SSLV2_RSA_PADDING);
-#endif
-
-#ifdef SSL_OP_NETSCAPE_CA_DN_BUG
-    NODE_DEFINE_CONSTANT(target, SSL_OP_NETSCAPE_CA_DN_BUG);
-#endif
-
-#ifdef SSL_OP_NETSCAPE_CHALLENGE_BUG
-    NODE_DEFINE_CONSTANT(target, SSL_OP_NETSCAPE_CHALLENGE_BUG);
-#endif
-
-#ifdef SSL_OP_NETSCAPE_DEMO_CIPHER_CHANGE_BUG
-    NODE_DEFINE_CONSTANT(target, SSL_OP_NETSCAPE_DEMO_CIPHER_CHANGE_BUG);
-#endif
-
-#ifdef SSL_OP_NETSCAPE_REUSE_CIPHER_CHANGE_BUG
-    NODE_DEFINE_CONSTANT(target, SSL_OP_NETSCAPE_REUSE_CIPHER_CHANGE_BUG);
 #endif
 
 #ifdef SSL_OP_NO_COMPRESSION
@@ -928,93 +945,13 @@ void DefineCryptoConstants(Local<Object> target) {
     NODE_DEFINE_CONSTANT(target, SSL_OP_NO_TLSv1_3);
 #endif
 
-#ifdef SSL_OP_PKCS1_CHECK_1
-    NODE_DEFINE_CONSTANT(target, SSL_OP_PKCS1_CHECK_1);
-#endif
-
-#ifdef SSL_OP_PKCS1_CHECK_2
-    NODE_DEFINE_CONSTANT(target, SSL_OP_PKCS1_CHECK_2);
-#endif
-
 #ifdef SSL_OP_PRIORITIZE_CHACHA
     NODE_DEFINE_CONSTANT(target, SSL_OP_PRIORITIZE_CHACHA);
-#endif
-
-#ifdef SSL_OP_SINGLE_DH_USE
-    NODE_DEFINE_CONSTANT(target, SSL_OP_SINGLE_DH_USE);
-#endif
-
-#ifdef SSL_OP_SINGLE_ECDH_USE
-    NODE_DEFINE_CONSTANT(target, SSL_OP_SINGLE_ECDH_USE);
-#endif
-
-#ifdef SSL_OP_SSLEAY_080_CLIENT_DH_BUG
-    NODE_DEFINE_CONSTANT(target, SSL_OP_SSLEAY_080_CLIENT_DH_BUG);
-#endif
-
-#ifdef SSL_OP_SSLREF2_REUSE_CERT_TYPE_BUG
-    NODE_DEFINE_CONSTANT(target, SSL_OP_SSLREF2_REUSE_CERT_TYPE_BUG);
-#endif
-
-#ifdef SSL_OP_TLS_BLOCK_PADDING_BUG
-    NODE_DEFINE_CONSTANT(target, SSL_OP_TLS_BLOCK_PADDING_BUG);
-#endif
-
-#ifdef SSL_OP_TLS_D5_BUG
-    NODE_DEFINE_CONSTANT(target, SSL_OP_TLS_D5_BUG);
 #endif
 
 #ifdef SSL_OP_TLS_ROLLBACK_BUG
     NODE_DEFINE_CONSTANT(target, SSL_OP_TLS_ROLLBACK_BUG);
 #endif
-
-# ifndef OPENSSL_NO_ENGINE
-
-# ifdef ENGINE_METHOD_RSA
-    NODE_DEFINE_CONSTANT(target, ENGINE_METHOD_RSA);
-# endif
-
-# ifdef ENGINE_METHOD_DSA
-    NODE_DEFINE_CONSTANT(target, ENGINE_METHOD_DSA);
-# endif
-
-# ifdef ENGINE_METHOD_DH
-    NODE_DEFINE_CONSTANT(target, ENGINE_METHOD_DH);
-# endif
-
-# ifdef ENGINE_METHOD_RAND
-    NODE_DEFINE_CONSTANT(target, ENGINE_METHOD_RAND);
-# endif
-
-# ifdef ENGINE_METHOD_EC
-    NODE_DEFINE_CONSTANT(target, ENGINE_METHOD_EC);
-# endif
-
-# ifdef ENGINE_METHOD_CIPHERS
-    NODE_DEFINE_CONSTANT(target, ENGINE_METHOD_CIPHERS);
-# endif
-
-# ifdef ENGINE_METHOD_DIGESTS
-    NODE_DEFINE_CONSTANT(target, ENGINE_METHOD_DIGESTS);
-# endif
-
-# ifdef ENGINE_METHOD_PKEY_METHS
-    NODE_DEFINE_CONSTANT(target, ENGINE_METHOD_PKEY_METHS);
-# endif
-
-# ifdef ENGINE_METHOD_PKEY_ASN1_METHS
-    NODE_DEFINE_CONSTANT(target, ENGINE_METHOD_PKEY_ASN1_METHS);
-# endif
-
-# ifdef ENGINE_METHOD_ALL
-    NODE_DEFINE_CONSTANT(target, ENGINE_METHOD_ALL);
-# endif
-
-# ifdef ENGINE_METHOD_NONE
-    NODE_DEFINE_CONSTANT(target, ENGINE_METHOD_NONE);
-# endif
-
-# endif  // !OPENSSL_NO_ENGINE
 
 #ifdef DH_CHECK_P_NOT_SAFE_PRIME
     NODE_DEFINE_CONSTANT(target, DH_CHECK_P_NOT_SAFE_PRIME);
@@ -1030,11 +967,6 @@ void DefineCryptoConstants(Local<Object> target) {
 
 #ifdef DH_NOT_SUITABLE_GENERATOR
     NODE_DEFINE_CONSTANT(target, DH_NOT_SUITABLE_GENERATOR);
-#endif
-
-#ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
-#define ALPN_ENABLED 1
-    NODE_DEFINE_CONSTANT(target, ALPN_ENABLED);
 #endif
 
 #ifdef RSA_PKCS1_PADDING
@@ -1105,7 +1037,7 @@ void DefineCryptoConstants(Local<Object> target) {
 #endif
 }
 
-void DefineSystemConstants(Local<Object> target) {
+void DefineFsConstants(Local<Object> target) {
   NODE_DEFINE_CONSTANT(target, UV_FS_SYMLINK_DIR);
   NODE_DEFINE_CONSTANT(target, UV_FS_SYMLINK_JUNCTION);
   // file access modes
@@ -1151,7 +1083,12 @@ void DefineSystemConstants(Local<Object> target) {
   NODE_DEFINE_CONSTANT(target, O_EXCL);
 #endif
 
-NODE_DEFINE_CONSTANT(target, UV_FS_O_FILEMAP);
+  // Windows-only open flags honored by libuv. They are 0 on other platforms.
+  NODE_DEFINE_CONSTANT(target, UV_FS_O_FILEMAP);
+  NODE_DEFINE_CONSTANT(target, UV_FS_O_TEMPORARY);
+  NODE_DEFINE_CONSTANT(target, UV_FS_O_SHORT_LIVED);
+  NODE_DEFINE_CONSTANT(target, UV_FS_O_SEQUENTIAL);
+  NODE_DEFINE_CONSTANT(target, UV_FS_O_RANDOM);
 
 #ifdef O_NOCTTY
   NODE_DEFINE_CONSTANT(target, O_NOCTTY);
@@ -1169,10 +1106,6 @@ NODE_DEFINE_CONSTANT(target, UV_FS_O_FILEMAP);
   NODE_DEFINE_CONSTANT(target, O_DIRECTORY);
 #endif
 
-#ifdef O_EXCL
-  NODE_DEFINE_CONSTANT(target, O_EXCL);
-#endif
-
 #ifdef O_NOATIME
   NODE_DEFINE_CONSTANT(target, O_NOATIME);
 #endif
@@ -1183,10 +1116,22 @@ NODE_DEFINE_CONSTANT(target, UV_FS_O_FILEMAP);
 
 #ifdef O_SYNC
   NODE_DEFINE_CONSTANT(target, O_SYNC);
+#elif UV_FS_O_SYNC != 0
+// Windows lacks the POSIX O_SYNC macro, but libuv maps UV_FS_O_SYNC to
+// FILE_FLAG_WRITE_THROUGH, so expose it under the portable name.
+#define O_SYNC UV_FS_O_SYNC
+  NODE_DEFINE_CONSTANT(target, O_SYNC);
+#undef O_SYNC
 #endif
 
 #ifdef O_DSYNC
   NODE_DEFINE_CONSTANT(target, O_DSYNC);
+#elif UV_FS_O_DSYNC != 0
+// Windows lacks the POSIX O_DSYNC macro, but libuv maps UV_FS_O_DSYNC to
+// FILE_FLAG_WRITE_THROUGH, so expose it under the portable name.
+#define O_DSYNC UV_FS_O_DSYNC
+  NODE_DEFINE_CONSTANT(target, O_DSYNC);
+#undef O_DSYNC
 #endif
 
 
@@ -1196,6 +1141,12 @@ NODE_DEFINE_CONSTANT(target, UV_FS_O_FILEMAP);
 
 #ifdef O_DIRECT
   NODE_DEFINE_CONSTANT(target, O_DIRECT);
+#elif UV_FS_O_DIRECT != 0
+// Windows lacks the POSIX O_DIRECT macro, but libuv maps UV_FS_O_DIRECT to
+// FILE_FLAG_NO_BUFFERING, so expose it under the portable name.
+#define O_DIRECT UV_FS_O_DIRECT
+  NODE_DEFINE_CONSTANT(target, O_DIRECT);
+#undef O_DIRECT
 #endif
 
 #ifdef O_NONBLOCK
@@ -1310,6 +1261,12 @@ void DefineDLOpenConstants(Local<Object> target) {
 #endif
 }
 
+void DefineInternalConstants(Local<Object> target) {
+  // Define module specific constants
+  NODE_DEFINE_CONSTANT(target, EXTENSIONLESS_FORMAT_JAVASCRIPT);
+  NODE_DEFINE_CONSTANT(target, EXTENSIONLESS_FORMAT_WASM);
+}
+
 void DefineTraceConstants(Local<Object> target) {
   NODE_DEFINE_CONSTANT(target, TRACE_EVENT_PHASE_BEGIN);
   NODE_DEFINE_CONSTANT(target, TRACE_EVENT_PHASE_END);
@@ -1334,92 +1291,98 @@ void DefineTraceConstants(Local<Object> target) {
   NODE_DEFINE_CONSTANT(target, TRACE_EVENT_PHASE_MEMORY_DUMP);
   NODE_DEFINE_CONSTANT(target, TRACE_EVENT_PHASE_MARK);
   NODE_DEFINE_CONSTANT(target, TRACE_EVENT_PHASE_CLOCK_SYNC);
-  NODE_DEFINE_CONSTANT(target, TRACE_EVENT_PHASE_ENTER_CONTEXT);
-  NODE_DEFINE_CONSTANT(target, TRACE_EVENT_PHASE_LEAVE_CONTEXT);
-  NODE_DEFINE_CONSTANT(target, TRACE_EVENT_PHASE_LINK_IDS);
 }
 
-}  // anonymous namespace
+void CreatePerContextProperties(Local<Object> target,
+                                Local<Value> unused,
+                                Local<Context> context,
+                                void* priv) {
+  Isolate* isolate = Isolate::GetCurrent();
+  Environment* env = Environment::GetCurrent(context);
 
-void DefineConstants(v8::Isolate* isolate, Local<Object> target) {
-  Environment* env = Environment::GetCurrent(isolate);
+  CHECK(target->SetPrototype(env->context(), Null(isolate)).FromJust());
 
-  Local<Object> os_constants = Object::New(isolate);
-  CHECK(os_constants->SetPrototype(env->context(),
-                                   Null(env->isolate())).FromJust());
-
-  Local<Object> err_constants = Object::New(isolate);
-  CHECK(err_constants->SetPrototype(env->context(),
-                                    Null(env->isolate())).FromJust());
-
-  Local<Object> sig_constants = Object::New(isolate);
-  CHECK(sig_constants->SetPrototype(env->context(),
-                                    Null(env->isolate())).FromJust());
-
-  Local<Object> priority_constants = Object::New(isolate);
-  CHECK(priority_constants->SetPrototype(env->context(),
-                                         Null(env->isolate())).FromJust());
-
-  Local<Object> fs_constants = Object::New(isolate);
-  CHECK(fs_constants->SetPrototype(env->context(),
-                                   Null(env->isolate())).FromJust());
-
-  Local<Object> crypto_constants = Object::New(isolate);
-  CHECK(crypto_constants->SetPrototype(env->context(),
-                                       Null(env->isolate())).FromJust());
-
-  Local<Object> zlib_constants = Object::New(isolate);
-  CHECK(zlib_constants->SetPrototype(env->context(),
-                                     Null(env->isolate())).FromJust());
-
-  Local<Object> dlopen_constants = Object::New(isolate);
-  CHECK(dlopen_constants->SetPrototype(env->context(),
-                                       Null(env->isolate())).FromJust());
-
-  Local<Object> trace_constants = Object::New(isolate);
-  CHECK(trace_constants->SetPrototype(env->context(),
-                                      Null(env->isolate())).FromJust());
+  Local<Object> os_constants =
+      Object::New(isolate, Null(isolate), nullptr, nullptr, 0);
+  Local<Object> err_constants =
+      Object::New(isolate, Null(isolate), nullptr, nullptr, 0);
+  Local<Object> sig_constants =
+      Object::New(isolate, Null(isolate), nullptr, nullptr, 0);
+  Local<Object> priority_constants =
+      Object::New(isolate, Null(isolate), nullptr, nullptr, 0);
+  Local<Object> fs_constants =
+      Object::New(isolate, Null(isolate), nullptr, nullptr, 0);
+  Local<Object> crypto_constants =
+      Object::New(isolate, Null(isolate), nullptr, nullptr, 0);
+  Local<Object> zlib_constants =
+      Object::New(isolate, Null(isolate), nullptr, nullptr, 0);
+  Local<Object> dlopen_constants =
+      Object::New(isolate, Null(isolate), nullptr, nullptr, 0);
+  Local<Object> trace_constants =
+      Object::New(isolate, Null(isolate), nullptr, nullptr, 0);
+  Local<Object> internal_constants =
+      Object::New(isolate, Null(isolate), nullptr, nullptr, 0);
 
   DefineErrnoConstants(err_constants);
   DefineWindowsErrorConstants(err_constants);
   DefineSignalConstants(sig_constants);
   DefinePriorityConstants(priority_constants);
-  DefineSystemConstants(fs_constants);
+  DefineFsConstants(fs_constants);
   DefineCryptoConstants(crypto_constants);
   DefineZlibConstants(zlib_constants);
   DefineDLOpenConstants(dlopen_constants);
   DefineTraceConstants(trace_constants);
+  DefineInternalConstants(internal_constants);
 
   // Define libuv constants.
   NODE_DEFINE_CONSTANT(os_constants, UV_UDP_REUSEADDR);
 
-  os_constants->Set(env->context(),
-                    OneByteString(isolate, "dlopen"),
-                    dlopen_constants).Check();
-  os_constants->Set(env->context(),
-                    OneByteString(isolate, "errno"),
-                    err_constants).Check();
-  os_constants->Set(env->context(),
-                    OneByteString(isolate, "signals"),
-                    sig_constants).Check();
-  os_constants->Set(env->context(),
-                    OneByteString(isolate, "priority"),
-                    priority_constants).Check();
-  target->Set(env->context(),
-              OneByteString(isolate, "os"),
-              os_constants).Check();
-  target->Set(env->context(),
-              OneByteString(isolate, "fs"),
-              fs_constants).Check();
-  target->Set(env->context(),
-              OneByteString(isolate, "crypto"),
-              crypto_constants).Check();
-  target->Set(env->context(),
-              OneByteString(isolate, "zlib"),
-              zlib_constants).Check();
-  target->Set(env->context(),
-              OneByteString(isolate, "trace"),
-              trace_constants).Check();
+  os_constants
+      ->Set(env->context(),
+            FIXED_ONE_BYTE_STRING(isolate, "dlopen"),
+            dlopen_constants)
+      .Check();
+  os_constants->Set(env->context(), env->errno_string(), err_constants).Check();
+  os_constants
+      ->Set(env->context(),
+            FIXED_ONE_BYTE_STRING(isolate, "signals"),
+            sig_constants)
+      .Check();
+  os_constants
+      ->Set(env->context(),
+            FIXED_ONE_BYTE_STRING(isolate, "priority"),
+            priority_constants)
+      .Check();
+  target
+      ->Set(env->context(), FIXED_ONE_BYTE_STRING(isolate, "os"), os_constants)
+      .Check();
+  target
+      ->Set(env->context(), FIXED_ONE_BYTE_STRING(isolate, "fs"), fs_constants)
+      .Check();
+  target
+      ->Set(env->context(),
+            FIXED_ONE_BYTE_STRING(isolate, "crypto"),
+            crypto_constants)
+      .Check();
+  target
+      ->Set(env->context(),
+            FIXED_ONE_BYTE_STRING(isolate, "zlib"),
+            zlib_constants)
+      .Check();
+  target
+      ->Set(env->context(),
+            FIXED_ONE_BYTE_STRING(isolate, "trace"),
+            trace_constants)
+      .Check();
+  target
+      ->Set(env->context(),
+            FIXED_ONE_BYTE_STRING(isolate, "internal"),
+            internal_constants)
+      .Check();
 }
 
+}  // namespace constants
 }  // namespace node
+
+NODE_BINDING_CONTEXT_AWARE_INTERNAL(constants,
+                                    node::constants::CreatePerContextProperties)

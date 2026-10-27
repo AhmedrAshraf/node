@@ -4,6 +4,8 @@
 
 #include "src/snapshot/snapshot-data.h"
 
+#include <limits>
+
 #include "src/common/assert-scope.h"
 #include "src/snapshot/serializer.h"
 
@@ -12,7 +14,7 @@ namespace internal {
 
 void SerializedData::AllocateData(uint32_t size) {
   DCHECK(!owns_data_);
-  data_ = NewArray<byte>(size);
+  data_ = NewArray<uint8_t>(size);
   size_ = size;
   owns_data_ = true;
 }
@@ -22,7 +24,7 @@ constexpr uint32_t SerializedData::kMagicNumber;
 
 SnapshotData::SnapshotData(const Serializer* serializer) {
   DisallowGarbageCollection no_gc;
-  const std::vector<byte>* payload = serializer->Payload();
+  const std::vector<uint8_t>* payload = serializer->Payload();
 
   // Calculate sizes.
   uint32_t size = kHeaderSize + static_cast<uint32_t>(payload->size());
@@ -35,18 +37,19 @@ SnapshotData::SnapshotData(const Serializer* serializer) {
 
   // Set header values.
   SetMagicNumber();
-  SetHeaderValue(kPayloadLengthOffset, static_cast<int>(payload->size()));
+  CHECK_LE(payload->size(), std::numeric_limits<uint32_t>::max());
+  SetHeaderValue(kPayloadLengthOffset, static_cast<uint32_t>(payload->size()));
 
   // Copy serialized data.
   CopyBytes(data_ + kHeaderSize, payload->data(),
             static_cast<size_t>(payload->size()));
 }
 
-base::Vector<const byte> SnapshotData::Payload() const {
-  const byte* payload = data_ + kHeaderSize;
+base::Vector<const uint8_t> SnapshotData::Payload() const {
+  const uint8_t* payload = data_ + kHeaderSize;
   uint32_t length = GetHeaderValue(kPayloadLengthOffset);
   DCHECK_EQ(data_ + size_, payload + length);
-  return base::Vector<const byte>(payload, length);
+  return base::Vector<const uint8_t>(payload, length);
 }
 
 }  // namespace internal
